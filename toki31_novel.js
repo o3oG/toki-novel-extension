@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.12",
+  version: "0.2.13",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -292,7 +292,18 @@ class DefaultExtension extends MProvider {
       function check() {
         if (delivered) return;
         if (/chrome-error:|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || ""))) { send("__TOKI_READ_ERR__NETWORK"); return; }
-        if (location.origin !== origin) { send("__TOKI_READ_ERR__REDIRECT"); return; }
+        // Resolve the rendered URL: some WebViews report a missing/opaque origin.
+        var href = String(location.href || "");
+        var match = href.match(/^https:\\/\\/([^/?#]+)/i);
+        var currentOrigin = match ? "https://" + match[1].toLowerCase() : "";
+        function canonical(value) { return String(value).toLowerCase().replace("https://www.", "https://"); }
+        if (!currentOrigin && /^(?:about:blank|about:srcdoc)?$/.test(href)) {
+          if (Date.now() - started < ${Math.max(500, seconds * 1000 - 3000)}) { window.setTimeout(check, 250); return; }
+          send("__TOKI_READ_ERR__NOT_LOADED"); return;
+        }
+        if (canonical(currentOrigin) !== canonical(origin)) {
+          send("__TOKI_READ_ERR__REDIRECT|expected=" + origin + "|actual=" + (currentOrigin || href.split(/[?#]/)[0]).slice(0, 160)); return;
+        }
         if (siteReady()) {
           if (!api) { send("__TOKI_READ_OK__" + document.documentElement.outerHTML); return; }
           if (fetching) return;
