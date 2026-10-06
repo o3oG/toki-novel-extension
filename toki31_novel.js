@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.13",
+  version: "0.2.14",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -341,6 +341,12 @@ class DefaultExtension extends MProvider {
     if (status) { const error = new Error("HTTP " + status[1]); error.statusCode = Number(status[1]); throw error; }
     if (detail === "__TOKI_READ_ERR__NETWORK") throw new Error("__TOKI31_ERR__NETWORK");
     if (detail === "__TOKI_READ_ERR__INCOMPLETE") throw this._invalidNovelResponse();
+    const redirected = detail.match(/^__TOKI_READ_ERR__REDIRECT\|expected=[^|]+\|actual=(https:\/\/toki\d+\.com)$/i);
+    if (redirected && this._numberedTokiOrigin(redirected[1])) {
+      const error = new Error(detail);
+      error.redirectBase = redirected[1].toLowerCase();
+      throw error;
+    }
     // A transport timeout or fetch error is not proof of a changed domain.
     throw new Error("WebView 응답을 가져오지 못했습니다. 앱 WebView에서 해당 주소를 확인한 뒤 다시 시도하세요. " + detail.slice(0, 150));
   }
@@ -369,6 +375,39 @@ class DefaultExtension extends MProvider {
     if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
     const body = await this._rawText(base + "/novel", base + "/novel", seconds);
     this._validateNovelResponse(base + "/novel", body);
+  }
+
+  async _followDomainRedirect(error, url, referer, operation, deadline) {
+    const initial = this._origin(url);
+    const path = this._text(url).slice(initial.length);
+    const refererPath = this._numberedTokiOrigin(referer)
+      ? this._text(referer).slice(this._origin(referer).length) : "/novel";
+    const visited = [initial];
+    let currentError = error;
+    for (let count = 0; count < 3; count++) {
+      const base = currentError.redirectBase;
+      if (!this._numberedTokiOrigin(base) || !this._isHttpsOrigin(base) || visited.indexOf(base) >= 0) {
+        throw new Error("소설 주소 이동이 반복되거나 유효하지 않습니다. 기존 주소를 유지합니다.");
+      }
+      visited.push(base);
+      const target = base + path;
+      const seconds = Math.floor((deadline - Date.now()) / 1000);
+      if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
+      try {
+        // Re-open the requested path at the site's explicit HTTPS destination.
+        const value = await operation(target, base + refererPath,
+          { candidate: true, remainingSeconds: seconds });
+        await this._verifyCandidate(base, deadline);
+        this._rememberDomain(base, initial);
+        return { value, url: target };
+      } catch (nextError) {
+        const authentication = this._authenticationRequired(nextError, target);
+        if (authentication) throw authentication;
+        if (!nextError?.redirectBase) throw nextError;
+        currentError = nextError;
+      }
+    }
+    throw new Error("소설 주소 이동 횟수를 초과했습니다. 기존 주소를 유지합니다.");
   }
 
   async _withDomainFallback(url, referer, operation) {
@@ -401,6 +440,7 @@ class DefaultExtension extends MProvider {
         }
         return { value, url };
       } catch (error) {
+        if (error?.redirectBase) return await this._followDomainRedirect(error, url, referer, operation, deadline);
         const authentication = this._authenticationRequired(error, url);
         if (authentication) throw authentication;
         const afterAuthFailure = resumeAuth && (error?.invalidNovelResponse === true || [403, 404, 410].indexOf(Number(error?.statusCode)) >= 0);
@@ -437,6 +477,7 @@ class DefaultExtension extends MProvider {
         this._rememberDomain(base, original.origin);
         return { value, url: target };
       } catch (error) {
+        if (error?.redirectBase) return await this._followDomainRedirect(error, target, currentReferer, operation, deadline);
         const authentication = this._authenticationRequired(error, target);
         if (authentication) throw authentication;
         lastError = error;
