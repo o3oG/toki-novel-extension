@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.10",
+  version: "0.2.11",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -15,6 +15,8 @@ const mangayomiSources = [{
   appMinVerReq: "0.9.2",
   notes: "6\uC2DC\uAC04 \uC778\uAE30 \u00B7 \uCD5C\uC2E0/\uAC80\uC0C9/\uD544\uD130 \u00B7 \uC804\uCCB4 \uD68C\uCC28 \u00B7 \uD14D\uC2A4\uD2B8 \uBCF8\uBB38 \u00B7 \uC911\uC559\uC2E0\uD638\uB4F1"
 }];
+
+let tokiNovelDomainRequestActive = false;
 
 function dcResolveListCardManifest(data, scope, tab) {
   const source = data && typeof data === "object" ? data : {};
@@ -175,6 +177,7 @@ class DefaultExtension extends MProvider {
 
   _rememberDomain(base, previous) {
     if (previous && previous !== base) this._setPreferenceString("toki_novel_previous_base", previous);
+    this._setPreferenceString("toki_novel_pending_auth_base", "");
     this.autoDomainBase = base;
     this._setPreferenceString("toki_novel_auto_domain_base", base);
     this._setPreferenceString("toki_novel_resolved_base", base);
@@ -182,12 +185,36 @@ class DefaultExtension extends MProvider {
     this._setPreferenceString("toki_novel_scan_after", "0");
   }
 
+  _authenticationRequired(error, url) {
+    const detail = this._text(error && (error.message || error));
+    if (!error?.authenticationRequired && !/AUTH_REQUIRED|Failed to bypass Cloudflare|Cloudflare.*(?:challenge|verification)|인증이 필요/i.test(detail)) return null;
+    const base = this._numberedTokiOrigin(url)?.origin;
+    if (base) this._setPreferenceString("toki_novel_pending_auth_base", base);
+    const blocked = new Error("Cloudflare 사람 인증이 필요합니다: " + (base || url) + "/novel — 해당 주소를 WebView에서 인증한 뒤 다시 시도하세요. 다음 번호로 이동하지 않습니다.");
+    blocked.authenticationRequired = true;
+    return blocked;
+  }
+
+  _isChallengeResponse(response) {
+    const headers = response.headers || {};
+    const header = name => {
+      for (const key of Object.keys(headers)) if (key.toLowerCase() === name) return this._text(headers[key]).toLowerCase();
+      return "";
+    };
+    const body = this._text(response.body);
+    return header("cf-mitigated") === "challenge"
+      || /cf-chl-|challenge-platform|cf-turnstile|challenge-form|verify you are human|verifying you are human/i.test(body)
+      || ([403, 503].indexOf(Number(response.statusCode)) >= 0 && /cloudflare/.test(header("server")));
+  }
+
   _domainFailure(error) {
     const detail = this._text(error && (error.message || error));
     const match = detail.match(/^(?:HTTP |__TOKI31_ERR__HTTP_)(\d{3})(?:$|\b)/);
     const status = Number(error && error.statusCode) || Number(match && match[1]);
+    if (/__TOKI31_ERR__INCOMPLETE/.test(detail)) return {retry: false, candidate: error?.invalidNovelResponse === true};
     const network = /SocketException|TimeoutException|timed? out|timeout|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|Failed host lookup|Network is unreachable|Connection refused|__TOKI31_ERR__NETWORK/i.test(detail)
       && !/HandshakeException|certificate|CERT_|SSL|TLS/i.test(detail);
+    if (error?.authenticationRequired || /AUTH_REQUIRED|Failed to bypass Cloudflare/i.test(detail)) return { retry: false, candidate: false };
     return {
       retry: [502, 503, 504].indexOf(status) >= 0 || network,
       candidate: [403, 404, 410, 502, 503, 504].indexOf(status) >= 0 || network || error?.invalidNovelResponse === true
@@ -236,6 +263,11 @@ class DefaultExtension extends MProvider {
       persistentConnection: false, noProxy: true,
       timeout, connectTimeout: Math.min(8, timeout)
     }).get(url, this.getHeaders(url, referer));
+    if (this._isChallengeResponse(response)) {
+      const error = new Error("AUTH_REQUIRED");
+      error.authenticationRequired = true;
+      throw error;
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const error = new Error("HTTP " + response.statusCode);
       error.statusCode = Number(response.statusCode);
@@ -252,6 +284,20 @@ class DefaultExtension extends MProvider {
   }
 
   async _withDomainFallback(url, referer, operation) {
+    if (tokiNovelDomainRequestActive) throw new Error("소설 요청이 진행 중입니다. 인증 또는 현재 요청이 끝난 뒤 다시 시도하세요.");
+    tokiNovelDomainRequestActive = true;
+    try { return await this._runDomainFallback(url, referer, operation); }
+    finally { tokiNovelDomainRequestActive = false; }
+  }
+
+  async _runDomainFallback(url, referer, operation) {
+    const requested = this._numberedTokiOrigin(url);
+    const pending = this._preferenceString("toki_novel_pending_auth_base", "");
+    const resumeAuth = requested && this._numberedTokiOrigin(pending) && this._isHttpsOrigin(pending);
+    if (resumeAuth) {
+      url = pending + this._text(url).slice(requested.origin.length);
+      if (this._numberedTokiOrigin(referer)) referer = pending + this._text(referer).slice(this._origin(referer).length);
+    }
     const original = this._numberedTokiOrigin(url);
     const deadline = Date.now() + this.domainRequestBudgetMs;
     const remaining = () => Math.floor((deadline - Date.now()) / 1000);
@@ -260,9 +306,17 @@ class DefaultExtension extends MProvider {
     if (!original) return { value: await operation(url, referer, { candidate: false, remainingSeconds: remaining() }), url };
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return { value: await operation(url, referer, { candidate: false, remainingSeconds: remaining() }), url };
+        const value = await operation(url, referer, { candidate: false, remainingSeconds: remaining() });
+        if (resumeAuth) {
+          await this._verifyCandidate(original.origin, deadline);
+          this._rememberDomain(original.origin, requested.origin);
+        }
+        return { value, url };
       } catch (error) {
-        if (!this._domainFailure(error).retry) throw error;
+        const authentication = this._authenticationRequired(error, url);
+        if (authentication) throw authentication;
+        const afterAuthFailure = resumeAuth && (error?.invalidNovelResponse === true || [403, 404, 410].indexOf(Number(error?.statusCode)) >= 0);
+        if (!this._domainFailure(error).retry && !afterAuthFailure) throw error;
         lastError = error;
         if (attempt === 0 && remaining() > 1) await this._pause(750);
       }
@@ -274,6 +328,7 @@ class DefaultExtension extends MProvider {
     if (Date.now() < Number(this._preferenceString("toki_novel_scan_after", "0"))) {
       throw new Error("서버 접속 실패. 기존 주소를 유지하며, 도메인 재탐색은 잠시 후 가능합니다. / " + this._text(lastError && lastError.message));
     }
+    if (resumeAuth) this._setPreferenceString("toki_novel_pending_auth_base", "");
     const candidates = [];
     const previous = this._trimSlash(this._preferenceString("toki_novel_previous_base", ""));
     if (this._numberedTokiOrigin(previous) && this._isHttpsOrigin(previous) && previous !== original.origin) candidates.push(previous);
@@ -294,6 +349,8 @@ class DefaultExtension extends MProvider {
         this._rememberDomain(base, original.origin);
         return { value, url: target };
       } catch (error) {
+        const authentication = this._authenticationRequired(error, target);
+        if (authentication) throw authentication;
         lastError = error;
         if (!this._domainFailure(error).candidate && error.message !== "DOMAIN_SCAN_BUDGET_EXCEEDED") throw error;
       }
@@ -1074,13 +1131,18 @@ class DefaultExtension extends MProvider {
       function check() {
         var text = String(window.__novelTTSText || "").trim();
         if (text.length > 0 && document.querySelector(".ne-h1")) { send("__TOKI31_OK__" + makeHtml(text)); return; }
+        var challenge = document.querySelector("#challenge-form, #cf-challenge-running, .cf-turnstile, script[src*=challenge-platform]") || /just a moment|verify you are human|verifying you are human|checking your browser/i.test(String(document.title) + " " + String(document.body?.innerText || ""));
+        if (challenge) {
+          if (Date.now() - startedAt < ${Math.max(500, webTimeout * 1000 - 3000)}) { window.setTimeout(check, 250); return; }
+          send("__TOKI31_ERR__AUTH_REQUIRED"); return;
+        }
         var heading = String(document.title || "") + " " + String(document.querySelector("h1")?.textContent || "");
         var status = heading.match(/\\b(403|404|410|502|503|504)\\b/);
         if (status && /gateway|time.?out|unavailable|forbidden|not found|gone/i.test(heading)) { send("__TOKI31_ERR__HTTP_" + status[1]); return; }
         if (/chrome-error:\\/\\/|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || ""))) { send("__TOKI31_ERR__NETWORK"); return; }
         if (Date.now() - startedAt < ${Math.max(500, webTimeout * 1000 - 3000)}) { window.setTimeout(check, 250); return; }
         var pageText = String((document.body && document.body.innerText) || "").replace(/\\s+/g, " ").slice(0, 240);
-        send("__TOKI31_ERR__TIMEOUT|state=" + document.readyState + "|title=" + document.title.slice(0, 100) + "|body=" + pageText);
+        send("__TOKI31_ERR__INCOMPLETE|state=" + document.readyState + "|title=" + document.title.slice(0, 100) + "|body=" + pageText);
       }
       window.addEventListener("novel-content-ready", check, { once: false });
       check();
@@ -1089,11 +1151,19 @@ class DefaultExtension extends MProvider {
       const raw = await sendMessage("evaluateJavascriptViaWebview", JSON.stringify([target, this.getHeaders(target, `${base}/novel`), [bridgeScript], webTimeout]));
       if (typeof raw === "string" && raw.startsWith("__TOKI31_OK__")) return raw.slice(13);
       if (typeof raw === "string" && raw.trim().startsWith("<")) throw this._invalidNovelResponse();
+      if (typeof raw === "string" && raw.startsWith("__TOKI31_ERR__INCOMPLETE")) {
+        const incomplete = this._invalidNovelResponse();
+        incomplete.message = raw.slice(0, 600);
+        throw incomplete;
+      }
       throw new Error(typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 600) : `EMPTY_OR_INVALID_RESULT:${typeof raw}`);
     } catch (error) {
       const detail = this._text(error && (error.message || error));
       if (/String[^\n]{0,80}bool|subtype of type[^\n]{0,80}bool|as bool/i.test(detail)) {
         throw new Error("\uD604\uC7AC Mangayomi \uBC84\uC804\uC758 WebView \uBB38\uC790\uC5F4 \uBC18\uD658 \uC624\uB958\uB85C \uCF58\uD150\uCE20\uB97C \uBC1B\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC678\uBD80\uC778\uC99D \uC11C\uBC84\uB97C \uC0AC\uC6A9\uD558\uAC70\uB098 Mangayomi \uC5C5\uB370\uC774\uD2B8\uB97C \uD655\uC778\uD558\uC138\uC694.");
+      }
+      if (/timeout|timed out/i.test(detail) && !/__TOKI31_ERR__HTTP_|__TOKI31_ERR__NETWORK/.test(detail)) {
+        throw new Error("본문 WebView 응답을 확인하지 못했습니다. 해당 주소에서 인증 상태를 확인한 뒤 다시 시도하세요.");
       }
       throw error;
     }
