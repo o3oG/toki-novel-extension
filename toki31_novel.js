@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.15",
+  version: "0.2.16",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -88,6 +88,7 @@ class DefaultExtension extends MProvider {
     this.autoDomainBase = "";
     this.maxDomainAdvances = 20;
     this.domainRequestBudgetMs = 120000;
+    this.listRequestBudgetMs = 20000;
     this.domainScanCooldownMs = 60000;
     this.domainCacheMs = 10 * 60 * 1000;
     this.pageSize = 49;
@@ -143,6 +144,7 @@ class DefaultExtension extends MProvider {
   }
 
   _setPreferenceString(key, value) {
+    if (this._listContext?.closed) return;
     try {
       new SharedPreferences().setString(key, this._text(value));
     } catch (_) {}
@@ -176,6 +178,7 @@ class DefaultExtension extends MProvider {
   }
 
   _rememberDomain(base, previous) {
+    this._checkListBudget();
     if (previous && previous !== base) this._setPreferenceString("toki_novel_previous_base", previous);
     this._setPreferenceString("toki_novel_pending_auth_base", "");
     this.autoDomainBase = base;
@@ -208,6 +211,7 @@ class DefaultExtension extends MProvider {
   }
 
   _domainFailure(error) {
+    if (error?.listDeadline) return { retry: false, candidate: false };
     const detail = this._text(error && (error.message || error));
     const match = detail.match(/^(?:HTTP |__TOKI31_ERR__HTTP_)(\d{3})(?:$|\b)/);
     const status = Number(error && error.statusCode) || Number(match && match[1]);
@@ -426,7 +430,7 @@ class DefaultExtension extends MProvider {
       if (this._numberedTokiOrigin(referer)) referer = pending + this._text(referer).slice(this._origin(referer).length);
     }
     const original = this._numberedTokiOrigin(url);
-    const deadline = Date.now() + this.domainRequestBudgetMs;
+    const deadline = Math.min(Date.now() + this.domainRequestBudgetMs, this._listContext?.deadline || Infinity);
     const remaining = () => Math.floor((deadline - Date.now()) / 1000);
     let lastError;
     // Non-Toki requests (manifests, signal, external hosts) are never scanned.
@@ -488,13 +492,17 @@ class DefaultExtension extends MProvider {
   }
 
   async _requestResult(url, referer, timeout) {
-    return await this._withDomainFallback(url, referer, async (target, currentReferer, context) => {
+    this._checkListBudget();
+    timeout = Math.min(timeout || 30, this._listContext ? Math.floor((this._listContext.deadline - Date.now()) / 1000) : Infinity);
+    const result = await this._withDomainFallback(url, referer, async (target, currentReferer, context) => {
       const seconds = Math.min(timeout || 30, this._numberedTokiOrigin(target) ? (context.candidate ? 20 : 35) : (timeout || 30), context.remainingSeconds);
       if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
       const body = await this._rawText(target, currentReferer, seconds);
       if (this._numberedTokiOrigin(target)) this._validateNovelResponse(target, body);
       return body;
     });
+    this._checkListBudget();
+    return result;
   }
 
   async _requestText(url, referer, timeout) {
@@ -937,12 +945,72 @@ class DefaultExtension extends MProvider {
     return this.loadApiList(page, value, "");
   }
 
+  _listTimeoutError() {
+    const error = new Error("소설 목록 응답 대기 20초를 초과했습니다. 재시도하거나 웹뷰에서 인증 상태를 확인하세요.");
+    error.listDeadline = true;
+    return error;
+  }
+
+  _checkListBudget() {
+    if (this._listContext && (this._listContext.closed || Date.now() >= this._listContext.deadline)) {
+      throw this._listTimeoutError();
+    }
+  }
+
+  async _withListBudget(action) {
+    // One isolated context per list call; no deadline leaks into chapter requests.
+    const scoped = Object.assign(Object.create(Object.getPrototypeOf(this)), this);
+    const context = { deadline: Date.now() + this.listRequestBudgetMs, closed: false };
+    scoped._listContext = context;
+    let timer;
+    try {
+      const work = action(scoped);
+      if (typeof setTimeout !== "function" || typeof clearTimeout !== "function") {
+        const result = await work;
+        scoped._checkListBudget();
+        return result;
+      }
+      return await Promise.race([work, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          context.closed = true;
+          reject(scoped._listTimeoutError());
+        }, this.listRequestBudgetMs);
+      })]);
+    } finally {
+      context.closed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  async _listWithOptionalCard(result, page, tab) {
+    if (Number(page) !== 1) return result;
+    const available = this._listContext.deadline - Date.now();
+    if (available < 1500 || typeof setTimeout !== "function" || typeof clearTimeout !== "function") return result;
+    // A decorative card must not turn a successfully fetched list into a timeout.
+    const cardSource = Object.assign(Object.create(Object.getPrototypeOf(this)), this);
+    const cardContext = { deadline: Date.now() + Math.min(1500, available - 250), closed: false };
+    cardSource._listContext = cardContext;
+    let timer;
+    try {
+      const card = await Promise.race([
+        cardSource._tabCard(tab).catch(() => null),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), cardContext.deadline - Date.now()); })
+      ]);
+      return card ? { list: [card].concat(result.list || []), hasNextPage: result.hasNextPage === true } : result;
+    } finally {
+      cardContext.closed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   async getPopular(page) {
-    return this._prependCard(await this._listForRule(page, this._tabRule(this.popularRulePreference, this._defaultPopularRule())), page, "popular");
+    return this._withListBudget(async source => source._listWithOptionalCard(
+      await source._listForRule(page, source._tabRule(source.popularRulePreference, source._defaultPopularRule())), page, "popular"));
   }
 
   async getLatestUpdates(page) {
-    return this._prependCard(await this._listForRule(page, this._tabRule(this.latestRulePreference, this._defaultLatestRule())), page, "latest");
+    return this._withListBudget(async source => source._listWithOptionalCard(
+      await source._listForRule(page, source._tabRule(source.latestRulePreference, source._defaultLatestRule())), page, "latest"));
   }
 
   _filterValue(filters, type, fallback) {
@@ -958,6 +1026,10 @@ class DefaultExtension extends MProvider {
   }
 
   async search(query, page, filters) {
+    return this._withListBudget(source => source._searchList(query, page, filters));
+  }
+
+  async _searchList(query, page, filters) {
     const rule = this._normalizeRule({
       mode: "filter",
       status: this._filterValue(filters, "novelStatus", "ongoing"),
@@ -1154,9 +1226,10 @@ class DefaultExtension extends MProvider {
     return headers;
   }
 
-  async _externalAuthJson(endpoint, path, body, ignoreFailure) {
+  async _externalAuthJson(endpoint, path, body, ignoreFailure, timeoutSeconds) {
     try {
-      const client = new Client({ persistentConnection: false, timeout: 30, connectTimeout: 10 });
+      const timeout = Math.max(1, Math.min(30, Math.floor(timeoutSeconds || 30)));
+      const client = new Client({ persistentConnection: false, timeout, connectTimeout: Math.min(10, timeout) });
       const response = body === undefined
         ? await client.get(endpoint + path, this._externalAuthHeaders(false))
         : await client.post(endpoint + path, this._externalAuthHeaders(true), body);
@@ -1204,48 +1277,96 @@ class DefaultExtension extends MProvider {
   }
 
   async _externalAuthNovel(name, target) {
-    const endpoint = this._externalAuthEndpoint();
-    const started = Date.now();
-    let stage = "health", jobId = "", lastState = "";
+    const started = Date.now(), deadline = started + 115000;
+    let stage = "health", jobId = "", lastState = "", attempt = 0;
+    const history = [];
+    const record = value => {
+      const line = Math.floor((Date.now() - started) / 1000) + "초 · " + value;
+      if (history.length && history[history.length - 1].split(" · ").slice(1).join(" · ") === value) return;
+      history.push(line);
+      if (history.length > 18) history.shift();
+    };
+    const seconds = cap => {
+      const remaining = Math.floor((deadline - Date.now()) / 1000);
+      if (remaining < 1) throw new Error("전체 인증 요청 대기시간 초과");
+      return Math.min(cap, remaining);
+    };
     try {
-    const health = await this._externalAuthJson(endpoint, "/health");
-    if (!health || health.service !== "rabbit-auth-server" || Number(health.protocol) !== 1) {
-      throw new Error("\uD638\uD658\uB418\uB294 \uC678\uBD80\uC778\uC99D \uC11C\uBC84(protocol v1)\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
-    }
-    if (health.ready !== true) throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84\uAC00 \uC544\uC9C1 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
-    stage = "create";
-    const opened = await this._externalAuthJson(endpoint, "/v1/jobs", { url: target, requestId: this._newRequestId(), kind: "novel" });
-    const id = this._text(opened && opened.id);
-    if (!/^[a-f0-9-]{36}$/i.test(id)) throw new Error("\uC678\uBD80\uC778\uC99D \uC791\uC5C5 \uBC88\uD638\uAC00 \uC798\uBABB\uB410\uC2B5\uB2C8\uB2E4.");
-    jobId = id;
-    try {
-      const deadline = Date.now() + 115000;
-      while (Date.now() < deadline) {
-        stage = "status";
-        const state = await this._externalAuthJson(endpoint, "/v1/jobs/" + id);
-        lastState = this._text(state && state.state);
-        if (state.state === "failed") throw new Error("서버 작업 실패 | code=" + this._text(state.error || state.errorCode || "server_code_missing"));
-        if (state.state === "ready") {
-          stage = "manifest";
-          const manifest = await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/manifest", {});
-          stage = "validate";
-          if (!manifest || this._text(manifest.id) !== id || this._text(manifest.chapterUrl) !== target) {
-            throw new Error("\uC678\uBD80\uC778\uC99D \uACB0\uACFC\uAC00 \uD604\uC7AC \uD68C\uCC28\uC640 \uC77C\uCE58\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
-          }
-          const text = this._text(manifest.text).trim();
-          if (manifest.kind !== "novel" || text.length < 1) {
-            throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84\uAC00 \uC720\uD6A8\uD55C \uC18C\uC124 \uBCF8\uBB38\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
-          }
-          return this._novelHtml(this._text(manifest.title).trim() || name, text);
-        }
-        await this._pause(750);
+      const endpoint = this._externalAuthEndpoint();
+      record("인증서버 연결 확인");
+      const health = await this._externalAuthJson(endpoint, "/health", undefined, false, seconds(8));
+      if (!health || health.service !== "rabbit-auth-server" || Number(health.protocol) !== 1) {
+        throw new Error("호환되는 외부인증 서버(protocol v1)가 아닙니다.");
       }
-      throw new Error("\uC678\uBD80\uC778\uC99D \uC2DC\uAC04\uC774 \uCD08\uACFC\uB410\uC2B5\uB2C8\uB2E4.");
-    } finally {
-      await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/close", {}, true);
-    }
+      if (health.ready !== true) throw new Error("외부인증 서버가 아직 준비되지 않았습니다.");
+      record("인증서버 연결 완료");
+      for (attempt = 1; attempt <= 3; attempt++) {
+        jobId = "";
+        lastState = "";
+        stage = "create";
+        record("시도 " + attempt + "/3 · 작업 요청");
+        const opened = await this._externalAuthJson(endpoint, "/v1/jobs", {
+          url: target, requestId: this._newRequestId(), kind: "novel"
+        }, false, seconds(8));
+        const id = this._text(opened && opened.id);
+        if (!/^[a-f0-9-]{36}$/i.test(id)) throw new Error("외부인증 작업 번호가 잘못됐습니다.");
+        jobId = id;
+        let retryCode = "";
+        try {
+          while (Date.now() < deadline) {
+            stage = "status";
+            const state = await this._externalAuthJson(endpoint, "/v1/jobs/" + id, undefined, false, seconds(8));
+            lastState = this._text(state && state.state);
+            record("시도 " + attempt + "/3 · 상태 " + (lastState || "unknown"));
+            if (lastState === "failed") {
+              const rawCode = this._text(state.error || state.errorCode || "server_code_missing");
+              const code = /^[a-z0-9_]{1,64}$/i.test(rawCode) ? rawCode : "server_code_invalid";
+              record("시도 " + attempt + "/3 · 실패 " + code);
+              if (["javascript_timeout", "main_thread_timeout"].includes(code)
+                  && attempt < 3 && deadline - Date.now() >= 10000) {
+                retryCode = code;
+                break;
+              }
+              throw new Error("서버 작업 실패 | code=" + code);
+            }
+            if (lastState === "ready") {
+              stage = "manifest";
+              record("본문 전달받기");
+              const manifest = await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/manifest", {}, false, seconds(15));
+              stage = "validate";
+              record("현재 회차와 본문 확인");
+              if (!manifest || this._text(manifest.id) !== id || this._text(manifest.chapterUrl) !== target) {
+                throw new Error("외부인증 결과가 현재 회차와 일치하지 않습니다.");
+              }
+              const text = this._text(manifest.text).trim();
+              if (manifest.kind !== "novel" || text.length < 1) throw new Error("유효한 소설 본문이 반환되지 않았습니다.");
+              record("본문 확인 완료");
+              return this._novelHtml(this._text(manifest.title).trim() || name, text);
+            }
+            if (!["queued", "authenticating"].includes(lastState)) throw new Error("알 수 없는 서버 작업 상태입니다.");
+            await this._pause(Math.min(750, Math.max(0, deadline - Date.now())));
+          }
+          if (!retryCode) throw new Error("전체 인증 요청 대기시간 초과");
+        } finally {
+          try {
+            const closed = await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/close", {}, true, 2);
+            record(closed?.state === "closed" ? "작업 정리 완료" : "작업 정리 응답 확인 불가");
+          } catch (_) { record("작업 정리 응답 확인 불가"); }
+        }
+        stage = "retry";
+        record("일시적 시간 초과 · 자동 재시도 " + attempt + "/2");
+        await this._pause(attempt * 500);
+      }
+      throw new Error("자동 재시도 횟수를 초과했습니다.");
     } catch (error) {
-      throw new Error("외부인증 진단 v0.2.15 | stage=" + stage + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created") + " | elapsedMs=" + (Date.now() - started) + " | " + this._text(error && (error.message || error)).slice(0, 500));
+      let detail = this._text(error && (error.message || error)).slice(0, 500);
+      const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
+      if (key) detail = detail.split(key).join("[접속 키 숨김]");
+      throw new Error("외부인증 진단 v0.2.16 | stage=" + stage
+        + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
+        + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
+        + " | " + detail + "\n진행 기록:\n" + history.join("\n")
+        + "\n재시도하거나 웹뷰에서 인증 상태를 확인하세요.");
     }
   }
 
