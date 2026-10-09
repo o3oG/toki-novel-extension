@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.14",
+  version: "0.2.15",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -1245,7 +1245,7 @@ class DefaultExtension extends MProvider {
       await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/close", {}, true);
     }
     } catch (error) {
-      throw new Error("외부인증 진단 v0.2.14 | stage=" + stage + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created") + " | elapsedMs=" + (Date.now() - started) + " | " + this._text(error && (error.message || error)).slice(0, 500));
+      throw new Error("외부인증 진단 v0.2.15 | stage=" + stage + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created") + " | elapsedMs=" + (Date.now() - started) + " | " + this._text(error && (error.message || error)).slice(0, 500));
     }
   }
 
