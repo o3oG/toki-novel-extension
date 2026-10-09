@@ -1205,21 +1205,30 @@ class DefaultExtension extends MProvider {
 
   async _externalAuthNovel(name, target) {
     const endpoint = this._externalAuthEndpoint();
+    const started = Date.now();
+    let stage = "health", jobId = "", lastState = "";
+    try {
     const health = await this._externalAuthJson(endpoint, "/health");
     if (!health || health.service !== "rabbit-auth-server" || Number(health.protocol) !== 1) {
       throw new Error("\uD638\uD658\uB418\uB294 \uC678\uBD80\uC778\uC99D \uC11C\uBC84(protocol v1)\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
     }
     if (health.ready !== true) throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84\uAC00 \uC544\uC9C1 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
+    stage = "create";
     const opened = await this._externalAuthJson(endpoint, "/v1/jobs", { url: target, requestId: this._newRequestId(), kind: "novel" });
     const id = this._text(opened && opened.id);
     if (!/^[a-f0-9-]{36}$/i.test(id)) throw new Error("\uC678\uBD80\uC778\uC99D \uC791\uC5C5 \uBC88\uD638\uAC00 \uC798\uBABB\uB410\uC2B5\uB2C8\uB2E4.");
+    jobId = id;
     try {
       const deadline = Date.now() + 115000;
       while (Date.now() < deadline) {
+        stage = "status";
         const state = await this._externalAuthJson(endpoint, "/v1/jobs/" + id);
-        if (state.state === "failed") throw new Error("\uC678\uBD80\uC778\uC99D \uC18C\uC124 \uC791\uC5C5\uC774 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.");
+        lastState = this._text(state && state.state);
+        if (state.state === "failed") throw new Error("서버 작업 실패 | code=" + this._text(state.error || state.errorCode || "server_code_missing"));
         if (state.state === "ready") {
+          stage = "manifest";
           const manifest = await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/manifest", {});
+          stage = "validate";
           if (!manifest || this._text(manifest.id) !== id || this._text(manifest.chapterUrl) !== target) {
             throw new Error("\uC678\uBD80\uC778\uC99D \uACB0\uACFC\uAC00 \uD604\uC7AC \uD68C\uCC28\uC640 \uC77C\uCE58\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
           }
@@ -1234,6 +1243,9 @@ class DefaultExtension extends MProvider {
       throw new Error("\uC678\uBD80\uC778\uC99D \uC2DC\uAC04\uC774 \uCD08\uACFC\uB410\uC2B5\uB2C8\uB2E4.");
     } finally {
       await this._externalAuthJson(endpoint, "/v1/jobs/" + id + "/close", {}, true);
+    }
+    } catch (error) {
+      throw new Error("외부인증 진단 v0.2.14 | stage=" + stage + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created") + " | elapsedMs=" + (Date.now() - started) + " | " + this._text(error && (error.message || error)).slice(0, 500));
     }
   }
 
