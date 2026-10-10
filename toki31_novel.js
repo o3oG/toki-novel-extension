@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.19",
+  version: "0.2.20",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -88,6 +88,7 @@ class DefaultExtension extends MProvider {
     this.autoDomainBase = "";
     this.maxDomainAdvances = 20;
     this.domainRequestBudgetMs = 120000;
+    this.domainObservationMs = 20000;
     this.listRequestBudgetMs = 20000;
     this.domainScanCooldownMs = 60000;
     this.domainCacheMs = 10 * 60 * 1000;
@@ -267,7 +268,7 @@ class DefaultExtension extends MProvider {
     return referer ? { Referer: referer } : {};
   }
 
-  async _webViewText(target, referer, timeoutSeconds) {
+  async _webViewText(target, referer, timeoutSeconds, domainProbe) {
     const base = this._origin(target);
     const path = this._text(target).slice(base.length);
     const isApi = /^\/api\//.test(path);
@@ -276,7 +277,8 @@ class DefaultExtension extends MProvider {
     const script = `(function () {
       if (window.__tokiReadInstalled) return;
       window.__tokiReadInstalled = true;
-      var started = Date.now(), delivered = false, fetching = false;
+      var started = ${Date.now()}, delivered = false, fetching = false;
+      var domainProbe = ${!!domainProbe};
       var origin = ${JSON.stringify(base)}, requestPath = ${JSON.stringify(path)}, api = ${isApi};
       function send(value) {
         if (delivered) return;
@@ -295,17 +297,23 @@ class DefaultExtension extends MProvider {
       }
       function check() {
         if (delivered) return;
-        if (/chrome-error:|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || ""))) { send("__TOKI_READ_ERR__NETWORK"); return; }
+        if (domainProbe && challenge()) { send("__TOKI_READ_ERR__AUTH_REQUIRED"); return; }
+        if (domainProbe && /ERR_CERT_|ERR_SSL_/.test(String(document.body?.innerText || ""))) { send("__TOKI_READ_ERR__CERTIFICATE"); return; }
+        var expired = Date.now() - started >= ${domainProbe ? seconds * 1000 : Math.max(500, seconds * 1000 - 3000)};
+        if (domainProbe && expired && !siteReady()) { send("__TOKI_READ_ERR__DOMAIN_UNCONFIRMED"); return; }
+        if (!domainProbe && (/chrome-error:|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || "")))) { send("__TOKI_READ_ERR__NETWORK"); return; }
         // Resolve the rendered URL: some WebViews report a missing/opaque origin.
         var href = String(location.href || "");
         var match = href.match(/^https:\\/\\/([^/?#]+)/i);
         var currentOrigin = match ? "https://" + match[1].toLowerCase() : "";
         function canonical(value) { return String(value).toLowerCase().replace("https://www.", "https://"); }
         if (!currentOrigin && /^(?:about:blank|about:srcdoc)?$/.test(href)) {
+          if (domainProbe) { window.setTimeout(check, 250); return; }
           if (Date.now() - started < ${Math.max(500, seconds * 1000 - 3000)}) { window.setTimeout(check, 250); return; }
           send("__TOKI_READ_ERR__NOT_LOADED"); return;
         }
         if (canonical(currentOrigin) !== canonical(origin)) {
+          if (domainProbe && /chrome-error:|chromewebdata/i.test(href)) { window.setTimeout(check, 250); return; }
           send("__TOKI_READ_ERR__REDIRECT|expected=" + origin + "|actual=" + (currentOrigin || href.split(/[?#]/)[0]).slice(0, 160)); return;
         }
         if (siteReady()) {
@@ -322,20 +330,21 @@ class DefaultExtension extends MProvider {
           }).catch(function () { send("__TOKI_READ_ERR__FETCH_FAILED"); });
           return;
         }
+        if (domainProbe && expired) { send("__TOKI_READ_ERR__DOMAIN_UNCONFIRMED"); return; }
         var heading = String(document.title || "") + " " + String(document.querySelector("h1")?.textContent || "");
-        if (!challenge()) {
+        if (!domainProbe && !challenge()) {
           var status = heading.match(/\\b(403|404|410|451|502|503|504)\\b/);
           if (status && /gateway|time.?out|unavailable|forbidden|not found|gone|legal reasons/i.test(heading)) { send("__TOKI_READ_ERR__HTTP_" + status[1]); return; }
           if (/chrome-error:|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || ""))) { send("__TOKI_READ_ERR__NETWORK"); return; }
         }
-        if (Date.now() - started >= ${Math.max(500, seconds * 1000 - 3000)}) {
+        if (!domainProbe && expired) {
           send(challenge() ? "__TOKI_READ_ERR__AUTH_REQUIRED" : "__TOKI_READ_ERR__INCOMPLETE"); return;
         }
         window.setTimeout(check, 250);
       }
       check();
     })();`;
-    const raw = await sendMessage("evaluateJavascriptViaWebview", JSON.stringify([landing, this._webViewHeaders(referer), [script], seconds]));
+    const raw = await sendMessage("evaluateJavascriptViaWebview", JSON.stringify([landing, this._webViewHeaders(referer), [script], domainProbe ? seconds + 1 : seconds]));
     if (typeof raw === "string" && raw.startsWith("__TOKI_READ_OK__")) return raw.slice("__TOKI_READ_OK__".length);
     const detail = this._text(raw);
     if (/AUTH_REQUIRED/.test(detail)) {
@@ -345,6 +354,9 @@ class DefaultExtension extends MProvider {
     if (status) { const error = new Error("HTTP " + status[1]); error.statusCode = Number(status[1]); throw error; }
     if (detail === "__TOKI_READ_ERR__NETWORK") throw new Error("__TOKI31_ERR__NETWORK");
     if (detail === "__TOKI_READ_ERR__INCOMPLETE") throw this._invalidNovelResponse();
+    if (detail === "__TOKI_READ_ERR__DOMAIN_UNCONFIRMED") {
+      const error = this._invalidNovelResponse(); error.domainUnconfirmed = true; throw error;
+    }
     const redirected = detail.match(/^__TOKI_READ_ERR__REDIRECT\|expected=[^|]+\|actual=(https:\/\/toki\d+\.com)$/i);
     if (redirected && this._numberedTokiOrigin(redirected[1])) {
       const error = new Error(detail);
@@ -354,11 +366,12 @@ class DefaultExtension extends MProvider {
     // A transport timeout or fetch error is not proof of a changed domain.
     const error = new Error("WebView 응답을 가져오지 못했습니다. 앱 WebView에서 해당 주소를 확인한 뒤 다시 시도하세요. " + detail.slice(0, 150));
     error.webViewNoResponse = !detail;
+    error.domainUnconfirmed = !!domainProbe && !detail;
     throw error;
   }
 
-  async _rawText(url, referer, timeout) {
-    if (this._numberedTokiOrigin(url)) return await this._webViewText(url, referer, timeout);
+  async _rawText(url, referer, timeout, domainProbe) {
+    if (this._numberedTokiOrigin(url)) return await this._webViewText(url, referer, timeout, domainProbe);
     const response = await new Client({
       persistentConnection: false, noProxy: true,
       timeout, connectTimeout: Math.min(8, timeout)
@@ -377,154 +390,107 @@ class DefaultExtension extends MProvider {
   }
 
   async _verifyCandidate(base, deadline, capSeconds) {
-    const seconds = Math.min(capSeconds || 20, this._listContext ? 3 : Infinity, Math.floor((deadline - Date.now()) / 1000));
+    const seconds = Math.min(capSeconds || 20, Math.floor((deadline - Date.now()) / 1000));
     if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
-    const body = await this._rawText(base + "/novel", base + "/novel", seconds);
+    const body = await this._rawText(base + "/novel", base + "/novel", seconds, true);
     this._validateNovelResponse(base + "/novel", body);
   }
 
-  async _followDomainRedirect(error, url, referer, operation, deadline) {
-    const initial = this._origin(url);
-    const path = this._text(url).slice(initial.length);
-    const refererPath = this._numberedTokiOrigin(referer)
-      ? this._text(referer).slice(this._origin(referer).length) : "/novel";
-    const visited = [initial];
-    let currentError = error;
-    for (let count = 0; count < 3; count++) {
-      const base = currentError.redirectBase;
-      if (!this._numberedTokiOrigin(base) || !this._isHttpsOrigin(base) || visited.indexOf(base) >= 0) {
-        throw new Error("소설 주소 이동이 반복되거나 유효하지 않습니다. 기존 주소를 유지합니다.");
-      }
-      visited.push(base);
-      const target = base + path;
-      const seconds = Math.floor((deadline - Date.now()) / 1000);
-      if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
-      try {
-        // Re-open the requested path at the site's explicit HTTPS destination.
-        const value = await operation(target, base + refererPath,
-          { candidate: true, remainingSeconds: seconds });
-        await this._verifyCandidate(base, deadline);
-        this._rememberDomain(base, initial);
-        return { value, url: target };
-      } catch (nextError) {
-        const authentication = this._authenticationRequired(nextError, target);
-        if (authentication) throw authentication;
-        if (!nextError?.redirectBase) throw nextError;
-        currentError = nextError;
-      }
-    }
-    throw new Error("소설 주소 이동 횟수를 초과했습니다. 기존 주소를 유지합니다.");
-  }
-
-  async _withDomainFallback(url, referer, operation) {
+  async _withDomainFallback(url, referer, operation, options) {
     if (tokiNovelDomainRequestActive) throw new Error("소설 요청이 진행 중입니다. 인증 또는 현재 요청이 끝난 뒤 다시 시도하세요.");
     tokiNovelDomainRequestActive = true;
-    try { return await this._runDomainFallback(url, referer, operation); }
+    try { return await this._runDomainFallback(url, referer, operation, options); }
     finally { tokiNovelDomainRequestActive = false; }
   }
 
-  async _runDomainFallback(url, referer, operation) {
+  async _observeDomain(base, deadline) {
+    const started = Date.now();
+    const allotted = Math.min(this.domainObservationMs, Math.max(0, deadline - started));
+    if (allotted < this.domainObservationMs) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
+    const list = this._listContext;
+    // Domain observation is separate from the 20-second list response budget.
+    if (list) { this._checkListBudget(); list.deadline += allotted + 1000; }
+    try {
+      await this._verifyCandidate(base, started + allotted, allotted / 1000);
+      return;
+    } catch (error) {
+      if (error?.authenticationRequired || error?.redirectBase || !this._domainFailure(error).candidate) throw error;
+      const wait = started + allotted - Date.now();
+      if (wait > 0) await this._pause(wait);
+      if (Date.now() < started + allotted) throw new Error("20초 주소 확인을 완료하지 못했습니다. 현재 번호를 유지합니다.");
+      error.domainUnconfirmed = true;
+      throw error;
+    } finally {
+      if (list) list.deadline -= Math.max(0, allotted + 1000 - (Date.now() - started));
+    }
+  }
+
+  async _runDomainFallback(url, referer, operation, options) {
     const requested = this._numberedTokiOrigin(url);
-    const pending = this._preferenceString("toki_novel_pending_auth_base", "");
-    const pendingToki = this._numberedTokiOrigin(pending);
-    const resumeAuth = requested && pendingToki && pendingToki.number >= requested.number && this._isHttpsOrigin(pending);
-    if (resumeAuth) {
-      url = pending + this._text(url).slice(requested.origin.length);
-      if (this._numberedTokiOrigin(referer)) referer = pending + this._text(referer).slice(this._origin(referer).length);
-    }
-    const original = this._numberedTokiOrigin(url);
-    const deadline = Math.min(Date.now() + this.domainRequestBudgetMs, this._listContext?.deadline || Infinity);
-    const remaining = () => Math.floor((deadline - Date.now()) / 1000);
-    const domainChecks = [];
-    const recordDomain = (base, error) => domainChecks.push(base + " · " + this._text(error?.message || error).split("\n")[0].slice(0, 180));
-    let lastError;
-    // Non-Toki requests (manifests, signal, external hosts) are never scanned.
-    if (!original) return { value: await operation(url, referer, { candidate: false, remainingSeconds: remaining() }), url };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const value = await operation(url, referer, { candidate: false, remainingSeconds: remaining() });
-        if (resumeAuth) {
-          await this._verifyCandidate(original.origin, deadline);
-          this._rememberDomain(original.origin, requested.origin);
-        }
-        return { value, url };
-      } catch (error) {
-        recordDomain(original.origin, error);
-        if (error?.redirectBase) return await this._followDomainRedirect(error, url, referer, operation, deadline);
-        const authentication = this._authenticationRequired(error, url);
-        if (authentication) throw authentication;
-        const afterAuthFailure = resumeAuth && (error?.invalidNovelResponse === true || [403, 404, 410].indexOf(Number(error?.statusCode)) >= 0);
-        const failure = this._domainFailure(error);
-        if (error?.domainUnavailable && failure.candidate) { lastError = error; break; }
-        if (!failure.retry && !afterAuthFailure) {
-          if (!failure.candidate) throw error;
-          // A missing chapter/API is not evidence that the entire origin moved.
-          if (this._text(url).split(/[?#]/)[0] !== original.origin + "/novel"
-              && this._text(url).split(/[?#]/)[0] !== original.origin + "/novel/") {
-            try { await this._verifyCandidate(original.origin, deadline); }
-            catch (probeError) {
-              const auth = this._authenticationRequired(probeError, url);
-              if (auth) throw auth;
-              if (!this._domainFailure(probeError).candidate && !probeError?.redirectBase) throw probeError;
-              if (probeError?.redirectBase) return await this._followDomainRedirect(probeError, url, referer, operation, deadline);
-              lastError = probeError;
-              break;
-            }
-            throw error;
-          }
-          lastError = error;
-          break;
-        }
-        lastError = error;
-        // Lists share a 20-second budget; leave time to validate the next origin.
-        if (this._listContext) break;
-        if (attempt === 0 && remaining() > 1) await this._pause(750);
-      }
-    }
-    const fail = () => {
-      this._setPreferenceString("toki_novel_scan_after", String(Date.now() + this.domainScanCooldownMs));
-      return new Error("주소 확인 v0.2.19 · 서버 장애 또는 주소 변경을 확인하지 못했습니다. 기존 주소를 유지합니다: " + original.origin + " / " + this._text(lastError && (lastError.message || lastError)) + "\n주소별 확인:\n" + domainChecks.join("\n"));
-    };
-    if (Date.now() < Number(this._preferenceString("toki_novel_scan_after", "0"))) {
-      throw new Error("서버 접속 실패. 기존 주소를 유지하며, 도메인 재탐색은 잠시 후 가능합니다. / " + this._text(lastError && lastError.message));
-    }
-    if (resumeAuth) this._setPreferenceString("toki_novel_pending_auth_base", "");
-    const candidates = [];
-    const previous = this._trimSlash(this._preferenceString("toki_novel_previous_base", ""));
-    for (let index = 1; index <= this.maxDomainAdvances; index++) {
-      const base = "https://toki" + (original.number + index) + ".com";
-      if (candidates.indexOf(base) < 0) candidates.push(base);
-    }
-    if (this._numberedTokiOrigin(previous) && this._isHttpsOrigin(previous) && previous !== original.origin && candidates.indexOf(previous) < 0) candidates.push(previous);
+    if (!requested) return {value: await operation(url, referer, {candidate:false, remainingSeconds:120}), url};
+    const pending = this._numberedTokiOrigin(this._preferenceString("toki_novel_pending_auth_base", ""));
+    const original = pending && pending.number >= requested.number ? pending : requested;
+    const path = this._text(url).slice(requested.origin.length);
+    const refererPath = this._numberedTokiOrigin(referer) ? this._text(referer).slice(this._origin(referer).length) : "/novel";
+    const deadline = Date.now() + this.domainRequestBudgetMs;
+    const candidates = [original.origin];
+    const visited = [], records = [];
+    let redirects = 0;
+    for (let step = 1; step <= this.maxDomainAdvances; step++) candidates.push("https://toki" + (original.number + step) + ".com");
     for (const base of candidates) {
-      if (remaining() < 1) break;
-      const target = base + this._text(url).slice(original.origin.length);
-      const currentReferer = referer && this._numberedTokiOrigin(referer)
-        ? base + this._text(referer).slice(this._origin(referer).length) : referer;
+      if (visited.indexOf(base) >= 0) continue;
+      if (deadline - Date.now() < this.domainObservationMs) break;
+      visited.push(base);
+      const target = base + path;
+      let authenticated = false;
       try {
-        await this._verifyCandidate(base, deadline);
-        if (remaining() < 1) break;
-        const value = await operation(target, currentReferer, { candidate: true, remainingSeconds: remaining() });
-        // Both the site structure and the actual requested result must succeed.
-        this._rememberDomain(base, original.origin);
-        return { value, url: target };
+        await this._observeDomain(base, deadline);
+        records.push(base + " · 정상 페이지 확인 · 번호 유지");
+        this._rememberDomain(base, requested.origin);
       } catch (error) {
-        recordDomain(base, error);
-        if (error?.redirectBase) return await this._followDomainRedirect(error, target, currentReferer, operation, deadline);
+        const authentication = this._authenticationRequired(error, target);
+        if (authentication) {
+          // A challenge is a live response. Never scan another number to avoid it.
+          if (!options?.allowAuthenticatedServer) throw authentication;
+          authenticated = true;
+          records.push(base + " · 인증 요구 확인 · 번호 유지");
+        } else if (error?.redirectBase) {
+          if (++redirects > 3 || visited.indexOf(error.redirectBase) >= 0) throw new Error("소설 주소 이동이 반복됩니다. 주소 확인이 필요합니다.");
+          candidates.splice(candidates.indexOf(base) + 1, 0, error.redirectBase);
+          records.push(base + " · 사이트 주소 이동: " + error.redirectBase);
+          continue;
+        } else {
+          records.push(base + " · " + this._text(error?.message || error).split("\n")[0].slice(0,180));
+          if (!error?.domainUnconfirmed) throw error;
+          records.push(base + " · 20초 동안 정상 페이지 및 인증 요구 미확인 · 다음 번호 요청");
+          continue;
+        }
+      }
+      // Once a normal page or challenge is observed, chapter/API errors cannot
+      // trigger migration. Missing chapters do not mean that this site moved.
+      try {
+        const value = await operation(target, base + refererPath, {
+          candidate:base !== requested.origin, remainingSeconds:Math.floor((deadline - Date.now()) / 1000),
+          domainVerified:!authenticated, authenticationObserved:authenticated
+        });
+        if (authenticated) this._rememberDomain(base, requested.origin);
+        return {value, url:target};
+      } catch (error) {
         const authentication = this._authenticationRequired(error, target);
         if (authentication) throw authentication;
-        lastError = error;
-        if (!this._domainFailure(error).candidate && error.message !== "DOMAIN_SCAN_BUDGET_EXCEEDED") throw error;
+        error.message += "\n주소 확인 v0.2.20:\n" + records.join("\n");
+        throw error;
       }
     }
-    throw fail();
+    this._setPreferenceString("toki_novel_scan_after", String(Date.now() + this.domainScanCooldownMs));
+    throw new Error("주소 확인 v0.2.20 · 정상 페이지 또는 인증 요구를 확인하지 못했습니다. 기존 주소 유지: " + requested.origin + "\n" + records.join("\n"));
   }
 
   async _requestResult(url, referer, timeout) {
     this._checkListBudget();
     timeout = Math.min(timeout || 30, this._listContext ? Math.floor((this._listContext.deadline - Date.now()) / 1000) : Infinity);
     const result = await this._withDomainFallback(url, referer, async (target, currentReferer, context) => {
-      const seconds = Math.min(timeout || 30, this._listContext && this._numberedTokiOrigin(target) ? 6 : Infinity, this._numberedTokiOrigin(target) ? (context.candidate ? 20 : 35) : (timeout || 30), context.remainingSeconds);
+      const seconds = Math.min(timeout || 30, this._listContext && this._numberedTokiOrigin(target) ? 20 : Infinity, this._numberedTokiOrigin(target) ? (context.candidate ? 20 : 35) : (timeout || 30), context.remainingSeconds);
       if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
       const body = await this._rawText(target, currentReferer, seconds);
       if (this._numberedTokiOrigin(target)) this._validateNovelResponse(target, body);
@@ -542,27 +508,25 @@ class DefaultExtension extends MProvider {
     const manual = this._trimSlash(this._migratedPreferenceString(this.domainPreference, "toki_novel_domain_url"));
     const recovered = this.autoDomainBase || this._preferenceString("toki_novel_auto_domain_base", "");
     const cached = this._trimSlash(this._preferenceString("toki_novel_resolved_base", ""));
-    const cachedAt = Number(this._preferenceString("toki_novel_resolved_base_time", "0"));
-    // Shipped address updates must supersede retired numbered addresses, including
-    // legacy manual settings and stale central signals. Custom origins stay manual.
-    if (this._isHttpsOrigin(manual) && !this._numberedTokiOrigin(manual)) return manual;
-    const newest = values => values.filter(value => this._isHttpsOrigin(value) && this._numberedTokiOrigin(value))
-      .sort((a, b) => this._numberedTokiOrigin(b).number - this._numberedTokiOrigin(a).number)[0] || this.fallbackBaseUrl;
-    const known = newest([this.fallbackBaseUrl, manual, recovered, cached]);
-    if (this._numberedTokiOrigin(manual)) return known;
-    if (cachedAt > 0 && Date.now() - cachedAt < this.domainCacheMs) return known;
+    if (this._isHttpsOrigin(manual)) {
+      const manualToki = this._numberedTokiOrigin(manual), recoveredToki = this._numberedTokiOrigin(recovered);
+      if (manualToki && recoveredToki && recoveredToki.number > manualToki.number) return recovered;
+      return manual;
+    }
+    if (this._isHttpsOrigin(recovered) && this._numberedTokiOrigin(recovered)) return recovered;
+    if (this._isHttpsOrigin(cached) && this._numberedTokiOrigin(cached)) return cached;
     try {
       const join = this.signalUrl.includes("?") ? "&" : "?";
       const data = JSON.parse(await this._requestText(this.signalUrl + join + "toki=" + Date.now(), this.signalUrl, this._listContext ? 2 : 4));
       const candidate = this._trimSlash(data?.domains?.toki?.baseUrl);
       if (this._isHttpsOrigin(candidate) && this._numberedTokiOrigin(candidate)) {
-        const resolved = newest([known, candidate]);
+        const resolved = candidate;
         this._setPreferenceString("toki_novel_resolved_base", resolved);
         this._setPreferenceString("toki_novel_resolved_base_time", String(Date.now()));
         return resolved;
       }
     } catch (_) {}
-    return known;
+    return this.fallbackBaseUrl;
   }
 
   absoluteUrl(base, url) {
@@ -1001,10 +965,13 @@ class DefaultExtension extends MProvider {
         return result;
       }
       return await Promise.race([work, new Promise((_, reject) => {
-        timer = setTimeout(() => {
+        const expire = () => {
+          const remaining = context.deadline - Date.now();
+          if (remaining > 0) { timer = setTimeout(expire, remaining); return; }
           context.closed = true;
           reject(scoped._listTimeoutError());
-        }, this.listRequestBudgetMs);
+        };
+        timer = setTimeout(expire, Math.max(1, context.deadline - Date.now()));
       })]);
     } finally {
       context.closed = true;
@@ -1394,7 +1361,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.19 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.20 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
@@ -1470,46 +1437,9 @@ class DefaultExtension extends MProvider {
     const target = this.siteUrl(base, url);
     if (this._externalAuthEnabled()) {
       const deadline = Date.now() + this.domainRequestBudgetMs;
-      const result = await this._withDomainFallback(target, `${base}/novel`, async current => {
-        const origin = this._origin(current);
-        const checked = Number(this._preferenceString("toki_novel_external_checked_time", "0"));
-        if (this._numberedTokiOrigin(current)
-            && (this._preferenceString("toki_novel_external_checked_base", "") !== origin
-              || !checked || Date.now() - checked >= 60000)) {
-          try {
-            await this._verifyCandidate(origin, deadline, 8);
-            this._setPreferenceString("toki_novel_external_checked_base", origin);
-            this._setPreferenceString("toki_novel_external_checked_time", String(Date.now()));
-          } catch (probeError) {
-            // The server and Mangayomi have separate authenticated browser sessions.
-            // An app-side challenge/unknown page must not preempt the server session.
-            if (probeError?.redirectBase) throw probeError;
-            if (!probeError?.authenticationRequired && !probeError?.invalidNovelResponse
-                && this._domainFailure(probeError).candidate) {
-              probeError.domainUnavailable = true;
-              throw probeError;
-            }
-          }
-        }
-        try { return await this._externalAuthNovel(name, current, deadline); }
-        catch (error) {
-          if (error?.externalAuthCode !== "manual_viewer_confirmation_required") throw error;
-          // This server code describes a viewer failure, not a dead domain.
-          // Only a separate site check may trigger migration of the same chapter.
-          try { await this._verifyCandidate(this._origin(current), deadline); }
-          catch (probeError) {
-            const auth = this._authenticationRequired(probeError, current);
-            if (auth) throw auth;
-            if (probeError?.redirectBase) throw probeError;
-            if (!probeError?.invalidNovelResponse && this._domainFailure(probeError).candidate) {
-              probeError.domainUnavailable = true;
-              throw probeError;
-            }
-            throw error;
-          }
-          throw error;
-        }
-      });
+      const result = await this._withDomainFallback(target, `${base}/novel`,
+        async current => await this._externalAuthNovel(name, current, deadline),
+        {allowAuthenticatedServer:true});
       return result.value;
     }
     const result = await this._withDomainFallback(target, `${base}/novel`,
