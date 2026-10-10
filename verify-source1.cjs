@@ -7,9 +7,11 @@ class Element{
 }
 const link=(href,text,attrs={},nodes={})=>new Element({href,...attrs},text,nodes);
 let fixture={links:[],title:'테스트 작품'};
+const documents=new Map();
 class Document{
- constructor(html){this.html=html} select(s){if(s==='a[href]'||s==='a')return fixture.links;if(s==='[class]')return fixture.links.filter(e=>e.attr('class'));return []}
- selectFirst(s){return s==='main h1, h1'?new Element({},fixture.title):null}
+ constructor(html){this.html=html;this.fixture=documents.get(html)||fixture}
+ select(s){const f=this.fixture;if(s==='a[href]'||s==='a')return f.links;if(s==='a.item-subject[href]')return f.links.filter(e=>e.attr('class')==='item-subject');if(s==='[class]')return f.links.filter(e=>e.attr('class'));return f.nodes?.[s]||[]}
+ selectFirst(s){const f=this.fixture;return s==='main h1, h1'?new Element({},f.title):s==='article h2, .view-title h2'&&f.bookTitle?new Element({},f.bookTitle):(f.nodes?.[s]||[])[0]||null}
 }
 const prefs=new Map();let preferenceReads=0;
 class SharedPreferences{get(k){return prefs.get(k)}getString(k,d){preferenceReads++;return prefs.get(k)??d}setString(k,v){prefs.set(k,v)}}
@@ -70,7 +72,47 @@ let count=0;const check=(name,f)=>{f();count++};
  const beforeReads=preferenceReads;e._rememberNovels([{name:'독립 작품',link:base+'/novel/99',imageUrl:'https://img.test/99.webp'}]);
  check('metadata write without racing default read',()=>assert.equal(preferenceReads,beforeReads));
  check('metadata across provider instances',()=>{const next=new c.Ext();assert.equal(next._rememberedNovel(base+'/novel/99').name,'독립 작품');assert.equal(next._rememberedNovel(base+'/novel/99').imageUrl,'https://img.test/99.webp')});
+ const book=base+'/novel/29689',tocRequests=[];
+ const makePage=(page,total=407)=>{
+   const links=[];for(let index=(page-1)*100;index<Math.min(page*100,total);index++) links.push(link('/novel/29689/'+(4062173-index),index===0?'역배기사 외전 : Weltanschauung (2)':index===1?'1998.04.13 인생 최악의 날':'회차 제목 ('+(index+1)+')',{class:'item-subject'}));
+   links.push(link('/novel/17709/9','다른 작품',{class:'item-subject'}),link('/novel/29689/10','다음 회차 버튼',{class:'btn'}));
+   const anchors=[1,2,3,4,5].map(n=>link(n%2?'?page='+n:book+'?page='+n,n+'페이지'));
+   anchors.push(link('https://evil.test/novel/29689?page=9','9페이지'),link('/novel/17709?page=9','9페이지'));
+   const pager=new Element({tag:'nav',class:'pg_wrap theme-comment-pager theme-episode-pager'},'현재'+page+'페이지2페이지3페이지4페이지5페이지 맨끝',{'a[href]':anchors});
+   return {links,title:'뉴토끼 - 웹툰 미리보기',bookTitle:'귀쟁이 투기장의 역배 기사님',nodes:{'.theme-episode-pager':[pager]}};
+ };
+ for(let page=1;page<=5;page++)documents.set('TOC'+page,makePage(page));
+ e._requestResult=async(url)=>{tocRequests.push(url);const page=e._pageNumber(url)||1;return {url,value:'TOC'+page}};
+ const complete=await e.getDetail(book);
+ check('all five pages and 407 entries',()=>{assert.equal(complete.chapters.length,407);assert.equal(tocRequests.length,5);assert(complete.description.includes('5페이지 · 407개 항목'));assert(complete.description.includes('사이트의 본편 회차 번호와 다를 수'))});
+ check('stable complete TOC order',()=>{assert.equal(complete.chapters[0].name,'Episode 407 · [목차 순번] 역배기사 외전 : Weltanschauung (2)');assert(complete.chapters[1].name.includes('Episode 406 · [목차 순번] 1998.04.13'));assert(complete.chapters.at(-1).name.startsWith('Episode 1 · '));assert.equal(new Set(complete.chapters.map(ch=>ch.url)).size,407)});
+ check('observed book heading',()=>assert.equal(complete.name,'귀쟁이 투기장의 역배 기사님'));
+ check('scope pagination to same book',()=>{assert(tocRequests.every(url=>url.startsWith(book)));assert(!tocRequests.some(url=>url.includes('page=9')))});
+ e._requestResult=async(url)=>{const page=e._pageNumber(url)||1;if(page===3)throw Error('HTTP 503');return {url,value:'TOC'+page}};
+ const partial=await e.getDetail(book);
+ check('failed page remains visible, no invented numbering',()=>{assert.equal(partial.chapters.length,307);assert(partial.description.includes('3페이지 · HTTP 503'));assert(partial.description.includes('목차 수집 미완료'));assert(partial.chapters.every(ch=>ch.name.startsWith('[회차 번호 확인 필요]')));assert(!partial.description.includes('목차 수집 완료'))});
+ e._requestResult=async(url)=>({url,value:'TOC1'});
+ const repeat=await e.getDetail(book);
+ check('repeated first page is not completion',()=>{assert.equal(repeat.chapters.length,100);assert(repeat.description.includes('같은 목차'));assert(repeat.description.includes('목차 수집 미완료'))});
+ let authCalls=0;e._requestResult=async()=>{authCalls++;const error=Error('AUTH_REQUIRED');error.authenticationRequired=true;throw error};
+ const authToc=await e._collectSerialChapters(new Document('TOC1'),base,'29689',book,now+75000);
+ check('manual authentication stops collection',()=>{assert.equal(authCalls,1);assert(!authToc.complete);assert.equal(authToc.failed.size,4)});
+ e._requestResult=async(url)=>({url:base+'/',value:'HOME'});
+ const redirected=await e._collectSerialChapters(new Document('TOC1'),base,'29689',book,now+75000);
+ check('homepage redirects are rejected',()=>{assert(!redirected.complete);assert.equal(redirected.chapters.length,100);assert(Array.from(redirected.failed.values()).every(reason=>reason.includes('초기 화면')))});
+ let deadlineCalls=0;e._requestResult=async()=>{deadlineCalls++;throw Error('Unexpected request')};
+ const expired=await e._collectSerialChapters(new Document('TOC1'),base,'29689',book,now);
+ check('whole TOC deadline',()=>{assert.equal(deadlineCalls,0);assert(!expired.complete);assert.equal(expired.failed.size,4)});
+ const singleFixture=makePage(1,3);singleFixture.nodes={};const singleDoc=new Document('SINGLE');singleDoc.fixture=singleFixture;
+ const single=await e._collectSerialChapters(singleDoc,base,'29689',book,now+75000);
+ check('single-page numbering includes epilogues',()=>{assert(single.complete);assert.equal(single.chapters.length,3);assert(single.chapters[0].name.startsWith('Episode 3 · [목차 순번]'));assert(single.chapters.at(-1).name.startsWith('Episode 1 · '))});
+ e._requestResult=async(url)=>({url,value:'TOC'+(e._pageNumber(url)||1)});
+ const middle=await e.getDetail(book+'?page=3');
+ check('starting in middle collects both directions',()=>{assert.equal(middle.chapters.length,407);assert(middle.description.includes('목차 수집 완료'));assert(middle.chapters[0].name.startsWith('Episode 407 · '));assert(middle.chapters.at(-1).name.startsWith('Episode 1 · '))});
+ const deferred=new c.Ext();deferred._setPreferenceString=()=>{};prefs.set('newtoki1_novel_report_bodyStructure','old v0.2.20');deferred._saveReport('bodyStructure','new v0.2.22');
+ check('current diagnostics win over pending preference writes',()=>assert.equal(deferred._report('bodyStructure'),'new v0.2.22'));
  const idx=JSON.parse(fs.readFileSync(__dirname+'/index.min.json'));
- check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.21');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
+ check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.22');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
+ check('Mangayomi WebView joins without duplicate novel path',()=>{assert.equal(idx[1].baseUrl,'https://newtoki1.org');for(const path of ['/novel/17709','/novel/29689','/novel/29689/4062173'])assert.equal(idx[1].baseUrl+path,base+path);assert(code.includes('baseUrl: "https://newtoki1.org"'))});
  console.log('PASS: '+count+' source 1 checks — polluted titles, merged covers, numbering/year handling, transport fallback/deadline, gates, scoped reader, visible diagnostics, redaction, source isolation');
 })().catch(e=>{console.error(e);process.exitCode=1});
