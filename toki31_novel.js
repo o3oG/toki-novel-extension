@@ -1,19 +1,19 @@
 const mangayomiSources = [{
-  name: "\uD1A0\uB07C \uC18C\uC124",
+  name: "toki xx 소설",
   lang: "ko",
   baseUrl: "https://toki34.com",
   apiUrl: "",
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.21",
+  version: "0.2.22",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
   isNsfw: true,
   hasCloudflare: false,
   appMinVerReq: "0.9.2",
-  notes: "정상·인증 주소 유지 · 20초 미응답 시 다음 번호 · 작품명/회차명 표시 · 문단 줄바꿈·들여쓰기 · 웹뷰 경로 중복 수정"
+  notes: "작품명/회차명 표시 · 문단 줄바꿈·한 칸 들여쓰기 · 글자 크기 문구 제거 · 20초 주소 전환 · 웹뷰 경로 수정"
 }];
 
 let tokiNovelDomainRequestActive = false;
@@ -26,9 +26,13 @@ function dcNovelReadableHtml(title, text, heading) {
   // one full-width character space in an inline pre span. A zero-width word
   // joiner also keeps the paginated reader's trim/split path from stripping it.
   // Do not change wrapping, line height or the original wording.
-  const paragraphs = String(text || "").replace(/\r\n?/g, "\n").split(/\n+/)
-    .map(line => line.trim()).filter(Boolean)
-    .map(line => '<p><span style="white-space: pre">&#8288;&#12288;</span>' + escape(line) + "</p>").join("");
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split(/\n+/)
+    .map(line => line.trim()).filter(Boolean);
+  // A leading viewer font-size label is a control, not chapter prose.
+  // Remove only exact labels before the first paragraph; preserve quoted
+  // labels and every matching line later in the actual story.
+  while (lines.length && /^(?:글자(?:\s*크기)?|글씨(?:\s*크기)?|폰트(?:\s*크기)?)\s*[:：]?\s*\d{1,3}(?:\.\d+)?\s*(?:px|pt)$/i.test(lines[0])) lines.shift();
+  const paragraphs = lines.map(line => '<p><span style="white-space: pre">&#8288;&#12288;</span>' + escape(line) + "</p>").join("");
   const titles = heading || {};
   const book = String(titles.bookTitle || "").trim();
   const combined = String(title || "").trim();
@@ -1419,7 +1423,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.21 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.22 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")

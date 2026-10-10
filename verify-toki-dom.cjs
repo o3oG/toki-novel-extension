@@ -36,6 +36,20 @@ function leadingTrim(node){
  if(node.firstChild)leadingTrim(node.firstChild);
 }
 (async()=>{
+ check('display name changes without replacing the source identity',()=>{
+  const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));
+  assert.equal(ctx.meta.name,'toki xx 소설');assert.equal(index[0].name,ctx.meta.name);
+  assert.equal(index[0].id,780920260913901);
+ });
+ check('leading viewer font controls disappear before real prose',()=>{
+  const d=new JSDOM(e._novelHtml('제목','글자16px\n폰트 크기: 18pt\n첫 문단\n둘째 문단'));
+  assert.deepEqual(Array.from(d.window.document.querySelectorAll('p'),p=>p.textContent),['\u2060\u3000첫 문단','\u2060\u3000둘째 문단']);d.window.close();
+ });
+ check('font words in quoted or later story lines remain unchanged',()=>{
+  for(const text of ['"글자16px"라고 말했다.\n다음 문단','시작 문단\n글자16px\n마지막 문단','글자16px이 보였다.']){
+   const d=new JSDOM(e._novelHtml('제목',text));assert.deepEqual(Array.from(d.window.document.querySelectorAll('p'),p=>p.textContent.slice(2)),text.split('\n'));d.window.close();
+  }
+ });
  check('old native detail URL reproduces screenshot',()=>assert.equal(nativeDetailUrl(base+'/novel',book),base+'/novel/novel/57317'));
  check('new source metadata opens saved absolute and relative books once',()=>{
   assert.equal(ctx.meta.baseUrl,base);
@@ -113,7 +127,7 @@ function leadingTrim(node){
  let sent='';local.window.__novelTTSText=text;local.window.flutter_inappwebview={callHandler:(_,v)=>sent=v};local.window.eval(bridge);
  check('local WebView uses the identical paragraph and heading formatter',()=>assert.equal(sent,'__TOKI31_OK__'+external));
  check('manifest contains matching source code, root URL and preserved ID',()=>{
-  const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));assert.equal(index[0].sourceCode,source);assert.equal(index[0].baseUrl,base);assert.equal(index[0].version,'0.2.21');assert.equal(index[0].id,780920260913901);
+  const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));assert.equal(index[0].sourceCode,source);assert.equal(index[0].baseUrl,base);assert.equal(index[0].version,'0.2.22');assert.equal(index[0].id,780920260913901);
  });
  d.window.close();x.window.close();local.window.close();
  console.log('PASS: '+count+' Toki reader DOM checks — separate headings, paragraph preservation, native indent cleaning, cached IDs, both reader modes, native WebView URL composition');

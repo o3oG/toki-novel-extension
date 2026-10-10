@@ -33,11 +33,29 @@ const html = `<h1>뉴토끼 - 웹툰 미리보기</h1><article>${info}<form id="
 let count = 0;
 const check = (name,fn) => {fn();count++;console.log('PASS: '+name);};
 (async () => {
+  check('display name and installed source identity stay paired',()=>{
+    const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));
+    assert.equal(index[1].name,'newtoki1.org 소설');assert.equal(index[1].id,780920261010903);
+    assert(code.includes('name: "newtoki1.org 소설"'));
+  });
+  check('leading font-size controls are removed from chapter content',()=>{
+    const d=new JSDOM(e._novelHtml('회차','글자16px\n글자 크기: 19.5px\n첫 문단\n둘째 문단'));
+    assert.deepEqual(Array.from(d.window.document.querySelectorAll('p'),p=>p.textContent),['\u2060\u3000첫 문단','\u2060\u3000둘째 문단']);d.window.close();
+  });
+  check('quoted and later font-size text is preserved as story',()=>{
+    for(const text of ['"글자16px"라고 말했다.\n다음 문단','시작 문단\n글자16px\n마지막 문단','글자16px이 보였다.']){
+      const d=new JSDOM(e._novelHtml('회차',text));assert.deepEqual(Array.from(d.window.document.querySelectorAll('p'),p=>p.textContent.slice(2)),text.split('\n'));d.window.close();
+    }
+  });
+  check('legacy genres and modern tags merge without comments or duplicate chips',()=>{
+    const d=new Document('<div class=view-title><table><tr><td>장르</td><td>판타지, 드라마</td></tr></table><span class=hero-v2-tag>판타지</span><span class=hero-v2-tag>#정통</span></div><div id=viewcomment><span class=hero-v2-tag>댓글 태그</span></div>');
+    const m=e._detailMetadata(d,d.selectFirst('.novel-detail'));assert.equal(m.genre.join(','),'판타지,드라마,#정통');
+  });
   e._requestResult = async url => ({url,value:html});
   const detail = await e.getDetail(book);
   check('legacy serial list includes all 36 chapters, not recent widgets',()=>{assert.equal(detail.chapters.length,36);assert.equal(new Set(detail.chapters.map(c=>c.url)).size,36);assert(detail.description.includes('목차 수집 완료'));});
   check('official left row number beats title part/year',()=>{assert.equal(detail.chapters[0].name,'1화 · 회차 제목 1');assert.equal(detail.chapters[33].name,'34화 · 지옥같은 수련을 시작하다 2');assert.equal(detail.chapters[5].name,'6화 · 1998.04.13 인생 최악의 날');assert(detail.chapters.at(-1).name.startsWith('36화'));});
-  check('author and five genres extracted from book table',()=>{assert.equal(detail.author,'모노스타토스');assert.equal(detail.artist,'모노스타토스');assert.equal(detail.genre.join(','),'판타지,현대,회귀,복수,범죄');assert(detail.description.startsWith('작가: 모노스타토스\n장르: 판타지, 현대, 회귀, 복수, 범죄'));});
+  check('author and five genres extracted from book table',()=>{assert.equal(detail.author,'모노스타토스');assert.equal(detail.artist,'모노스타토스');assert.equal(detail.genre.join(','),'판타지,현대,회귀,복수,범죄');assert(!detail.description.startsWith('작가:'));assert(!detail.description.includes('장르: 판타지, 현대, 회귀, 복수, 범죄'));assert(!detail.description.includes('태그:'));});
   check('detail cover and ongoing status retained',()=>{assert.equal(detail.imageUrl,'https://img.example/cover.webp');assert.equal(detail.status,0);});
   const completed = new Document(html.replace('연재중','완결'));
   check('complete status read from book metadata',()=>assert.equal(e._detailMetadata(completed,completed.selectFirst('.novel-detail')).status,1));
