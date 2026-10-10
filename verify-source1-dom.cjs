@@ -62,6 +62,9 @@ const check = (name,fn) => {fn();count++;console.log('PASS: '+name);};
   check('single LF, blank lines and CRLF become indented p blocks',()=>{assert.equal(dom.window.document.querySelectorAll('p').length,4);assert.equal(dom.window.document.querySelectorAll('br').length,0);assert.equal(dom.window.document.querySelector('p').textContent,'\u2060\u3000첫 문단. 두 문장은 그대로 둡니다.');});
   check('text and escaping retained without injected HTML',()=>{assert.equal(dom.window.document.querySelector('h2').textContent,'제목 & <회차>');assert.equal(dom.window.document.querySelectorAll('p')[2].textContent,'\u2060\u3000마지막 & <내용> 문단.');assert(!dom.window.document.querySelector('내용'));assert(!formatted.includes('line-height'));});
   check('exactly one preserved space per paragraph',()=>{const parsed=new JSDOM(e._novelHtml('들여쓰기','  첫 문단\n\u00a0둘째 문단'));assert.deepEqual(Array.from(parsed.window.document.querySelectorAll('p'),p=>p.textContent),['\u2060\u3000첫 문단','\u2060\u3000둘째 문단']);parsed.window.close();});
+  check('book and official chapter render as separate blocks at an 80 percent size ratio',()=>{const d=new JSDOM(e._novelHtml('귀쟁이 투기장의 역배 기사님 다시 움직이는 하늘 (3)','첫 문단',{bookTitle:'귀쟁이 투기장의 역배 기사님',chapterTitle:'431화 · 다시 움직이는 하늘 (3)'}));const a=d.window.document.querySelector('h2'),b=d.window.document.querySelector('h3');assert.equal(a.textContent,'귀쟁이 투기장의 역배 기사님');assert.equal(b.textContent,'431화 · 다시 움직이는 하늘 (3)');assert.equal(a.nextElementSibling,b);assert(Math.abs(parseFloat(b.style.fontSize)/parseFloat(a.style.fontSize)-0.8)<1e-12);assert.equal(d.window.document.querySelectorAll('p').length,1);d.window.close();});
+  check('known book prefix is removed once without guessing numeric titles',()=>{for(const [title,bookName,expected] of [['1984 세계 1998.04.13 인생 최악의 날','1984 세계','1998.04.13 인생 최악의 날'],['작품과 다른 회차','작품','작품과 다른 회차']]){const d=new JSDOM(e._novelHtml(title,'본문',{bookTitle:bookName}));assert.equal(d.window.document.querySelector('h3').textContent,expected);d.window.close();}});
+  check('unknown book stays explicit and heading text cannot inject HTML',()=>{const d=new JSDOM(e._novelHtml('combined','본문',{chapterTitle:'1화 · <img onerror="x"> & 회차'}));assert.equal(d.window.document.querySelector('h2').textContent,'[작품명 확인 필요]');assert.equal(d.window.document.querySelector('h3').textContent,'1화 · <img onerror="x"> & 회차');assert(!d.window.document.querySelector('img'));d.window.close();});
   // Reproduce the app's DOM serialization + entity decoding, then the
   // flutter_html 3.0.0 block-leading trim path. This exposed the 0.2.25 bug.
   const nativeClean = html => {
@@ -90,10 +93,14 @@ const check = (name,fn) => {fn();count++;console.log('PASS: '+name);};
   e._requestResult=async()=>{throw Error('RhttpConnectionException Connection error URL: '+base+'/novel/34428?token=PRIVATE Bearer PRIVATE');};
   await assert.rejects(e.getDetail(base+'/novel/34428'),/작품 상세 연결 실패/);
   check('refresh failure names book and saves full redacted transport reason',()=>{const r=e._report('detailRequest');assert(r.includes('/novel/34428'));assert(r.includes('RhttpConnectionException'));assert(!r.includes('PRIVATE'));assert(!r.includes('?token'));});
-  await e._localWebViewNovel('fixture',book+'/10001',base,8);
-  const local = new JSDOM('<h3 class="theme-novel-title">테스트 회차</h3><div class="novel-viewer">'+Array.from({length:3},(_,i)=>'<p>로컬 본문 '+i+' 입니다. 문장을 변경하지 않습니다.</p>').join('')+'</div>',{url:book+'/10001',runScripts:'outside-only'});
+  await e._localWebViewNovel('fixture',book+'/10001',base,8,{bookTitle:'저장된 작품명',chapterTitle:'1화 · 테스트 회차'});
+  const local = new JSDOM('<h2><a href="/novel/17709">확인된 작품명</a></h2><h3 class="theme-novel-title">확인된 작품명 테스트 회차</h3><div class="novel-viewer">'+Array.from({length:3},(_,i)=>'<p>로컬 본문 '+i+' 입니다. 문장을 변경하지 않습니다.</p>').join('')+'</div>',{url:book+'/10001',runScripts:'outside-only'});
   let sent='';local.window.flutter_inappwebview={callHandler:(_,v)=>sent=v};local.window.eval(bridge);
   check('local WebView and external server share paragraph formatter',()=>{assert(sent.startsWith('__TOKI31_OK__'));const d=new JSDOM(nativeClean(sent.replace('__TOKI31_OK__','')));assert.equal(d.window.document.querySelectorAll('p').length,3);for(const p of d.window.document.querySelectorAll('p')){leadingTrim(p);assert(p.textContent.startsWith('\u2060\u3000'));}d.window.close();});
+  check('live WebView book title and known chapter keep separate lines',()=>{const d=new JSDOM(sent.replace('__TOKI31_OK__',''));assert.equal(d.window.document.querySelector('h2').textContent,'확인된 작품명');assert.equal(d.window.document.querySelector('h3').textContent,'1화 · 테스트 회차');d.window.close();});
+  e._externalAuthEnabled=()=>true;e._externalAuthNovel=async(name,url,heading)=>e._novelHtml('미카엘 : 악을 심판하는 천사 회차 제목 1','본문',heading);
+  const delivered=await e.getHtmlContent('이전 작품명',book+'/10001');
+  check('external reader receives URL matched book and TOC chapter metadata',()=>{const d=new JSDOM(delivered);assert.equal(d.window.document.querySelector('h2').textContent,'미카엘 : 악을 심판하는 천사');assert.equal(d.window.document.querySelector('h3').textContent,'1화 · 회차 제목 1');d.window.close();});
   local.window.close();dom.window.close();
   console.log('PASS: '+count+' source 1 real DOM checks');
 })().catch(error=>{console.error(error);process.exitCode=1;});
