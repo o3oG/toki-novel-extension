@@ -1,22 +1,52 @@
 const mangayomiSources = [{
   name: "\uD1A0\uB07C \uC18C\uC124",
   lang: "ko",
-  baseUrl: "https://toki34.com/novel",
+  baseUrl: "https://toki34.com",
   apiUrl: "",
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.20",
+  version: "0.2.21",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
   isNsfw: true,
   hasCloudflare: false,
   appMinVerReq: "0.9.2",
-  notes: "6\uC2DC\uAC04 \uC778\uAE30 \u00B7 \uCD5C\uC2E0/\uAC80\uC0C9/\uD544\uD130 \u00B7 \uC804\uCCB4 \uD68C\uCC28 \u00B7 \uD14D\uC2A4\uD2B8 \uBCF8\uBB38 \u00B7 \uC911\uC559\uC2E0\uD638\uB4F1"
+  notes: "정상·인증 주소 유지 · 20초 미응답 시 다음 번호 · 작품명/회차명 표시 · 문단 줄바꿈·들여쓰기 · 웹뷰 경로 중복 수정"
 }];
 
 let tokiNovelDomainRequestActive = false;
+
+function dcNovelReadableHtml(title, text, heading) {
+  const escape = value => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // Source line breaks are paragraph boundaries. The app converts NBSP to an
+  // ordinary space, then flutter_html trims block-leading whitespace. Preserve
+  // one full-width character space in an inline pre span. A zero-width word
+  // joiner also keeps the paginated reader's trim/split path from stripping it.
+  // Do not change wrapping, line height or the original wording.
+  const paragraphs = String(text || "").replace(/\r\n?/g, "\n").split(/\n+/)
+    .map(line => line.trim()).filter(Boolean)
+    .map(line => '<p><span style="white-space: pre">&#8288;&#12288;</span>' + escape(line) + "</p>").join("");
+  const titles = heading || {};
+  const book = String(titles.bookTitle || "").trim();
+  const combined = String(title || "").trim();
+  let chapter = String(titles.chapterTitle || "").trim();
+  if (!chapter && book && combined !== book) {
+    // Strip only an exact, known book prefix; never guess where a title splits.
+    chapter = combined.startsWith(book) && /^[\s·|:-]/.test(combined.slice(book.length))
+      ? combined.slice(book.length).replace(/^[\s·|:-]+/, "") : combined;
+  }
+  // Absolute CSS sizes avoid relative font-size compounding in flutter_html 3.
+  const mainTitle = book || (chapter ? "[작품명 확인 필요]" : (combined || "Chapter"));
+  const header = '<h2 class="toki-novel-book-title" style="font-size: 24px; margin: 0 0 8px 0">'
+    + escape(mainTitle) + '</h2>'
+    + (chapter ? '<h3 class="toki-novel-chapter-title" style="font-size: 19.2px; margin: 0 0 12px 0">'
+      + escape(chapter) + '</h3>' : "");
+  return header + '<hr><div class="toki-novel-paragraphs">' + paragraphs + "</div>";
+}
+
 
 function dcResolveListCardManifest(data, scope, tab) {
   const source = data && typeof data === "object" ? data : {};
@@ -94,6 +124,7 @@ class DefaultExtension extends MProvider {
     this.domainCacheMs = 10 * 60 * 1000;
     this.pageSize = 49;
     this.requestSequence = 0;
+    this.readerHeadings = new Map();
     this.fallbackCover = this.assetBaseUrl + "/cover/auto-novel-1.png";
   }
 
@@ -537,8 +568,12 @@ class DefaultExtension extends MProvider {
   }
 
   siteUrl(base, url) {
-    const value = this._text(url).trim();
-    if (!value) return this._trimSlash(base);
+    // Old source metadata included /novel, while the app appends the full
+    // /novel/{book} path. Repair only duplicated novel paths, not query values.
+    const value = this._text(url).trim().replace(
+      /^(https?:\/\/[^/?#]+\/|\/?)novel\/(?:novel\/)+(?=\d+(?:[/?#]|$))/i, "$1novel/");
+    base = this._origin(base) || this._trimSlash(base);
+    if (!value) return base;
     if (/^https?:\/\//i.test(value)) {
       const match = value.match(/^https?:\/\/[^/]+(\/.*)$/i);
       return match ? this.absoluteUrl(base, match[1]) : value;
@@ -1188,6 +1223,7 @@ class DefaultExtension extends MProvider {
       }
     }
 
+    this._rememberReaderHeadings(target, name, chapters);
     return {
       name,
       link: target,
@@ -1262,18 +1298,40 @@ class DefaultExtension extends MProvider {
     }
   }
 
-  _novelHtml(title, text) {
-    const paragraphs = this._text(text)
-      .replace(/\r\n?/g, "\n")
-      .split(/\n{2,}/)
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .map((value) => this.escapeHtml(value).replace(/\n/g, "<br>"))
-      .join("<br><br>");
-    return `<h2>${this.escapeHtml(title || "Chapter")}</h2><hr><br><div>${paragraphs}</div>`;
+  _rememberReaderHeadings(target, name, chapters) {
+    const bookId = this._text(target).match(/\/novel\/(\d+)(?:[/?#]|$)/)?.[1];
+    if (!bookId || !this.cleanText(name)) return;
+    const titles = {};
+    for (const chapter of chapters || []) {
+      const match = this._text(chapter.url).match(/\/novel\/(\d+)\/(\d+)(?:[?#]|$)/);
+      if (match && match[1] === bookId && this.cleanText(chapter.name)) titles[match[2]] = this.cleanText(chapter.name);
+    }
+    // IDs survive numbered domain changes. Store only headings, not body text.
+    const record = {bookTitle:this.cleanText(name), chapters:titles};
+    this.readerHeadings.set(bookId, record);
+    while (this.readerHeadings.size > 50) this.readerHeadings.delete(this.readerHeadings.keys().next().value);
+    this._setPreferenceString("toki_novel_reader_headings_v21_" + bookId, JSON.stringify(record));
   }
 
-  async _externalAuthNovel(name, target, requestDeadline) {
+  _readerHeading(name, target) {
+    const match = this._text(target).match(/\/novel\/(\d+)\/(\d+)(?:[?#]|$)/);
+    let cached = {};
+    if (match) {
+      try { cached = this.readerHeadings.get(match[1])
+        || JSON.parse(this._preferenceString("toki_novel_reader_headings_v21_" + match[1], "{}")) || {}; }
+      catch (_) {}
+    }
+    return {
+      bookTitle:this.cleanText(cached.bookTitle || name).replace(/^\d+위\s*·\s*/, ""),
+      chapterTitle:this.cleanText(match && cached.chapters?.[match[2]])
+    };
+  }
+
+  _novelHtml(title, text, heading) {
+    return dcNovelReadableHtml(title, text, heading);
+  }
+
+  async _externalAuthNovel(name, target, requestDeadline, heading) {
     const started = Date.now(), deadline = Math.min(started + 115000, requestDeadline || Infinity);
     let stage = "health", jobId = "", lastState = "", attempt = 0;
     const history = [];
@@ -1340,7 +1398,7 @@ class DefaultExtension extends MProvider {
               const text = this._text(manifest.text).trim();
               if (manifest.kind !== "novel" || text.length < 1) throw new Error("유효한 소설 본문이 반환되지 않았습니다.");
               record("본문 확인 완료");
-              return this._novelHtml(this._text(manifest.title).trim() || name, text);
+              return this._novelHtml(this._text(manifest.title).trim() || name, text, heading);
             }
             if (!["queued", "authenticating"].includes(lastState)) throw new Error("알 수 없는 서버 작업 상태입니다.");
             await this._pause(Math.min(750, Math.max(0, deadline - Date.now())));
@@ -1361,7 +1419,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.20 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.21 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
@@ -1371,7 +1429,7 @@ class DefaultExtension extends MProvider {
     }
   }
 
-  async _localWebViewNovel(name, target, base, timeoutSeconds) {
+  async _localWebViewNovel(name, target, base, timeoutSeconds, heading) {
     const webTimeout = Math.max(1, timeoutSeconds || 45);
     const bridgeScript = `(function () {
       if (window.__mangayomiTokiNovelBridgeInstalled) return;
@@ -1383,13 +1441,10 @@ class DefaultExtension extends MProvider {
         delivered = true;
         window.flutter_inappwebview.callHandler("setResponse", String(value || ""));
       }
-      function escapeHtml(value) {
-        return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
-      }
       function makeHtml(text) {
-        var title = document.querySelector(".ne-h1")?.textContent?.trim() || document.title.split(" | ")[0] || "Chapter";
-        var paragraphs = String(text || "").replace(/\\r\\n?/g, "\\n").split(/\\n{2,}/).map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) { return escapeHtml(line).replace(/\\n/g, "<br>"); }).join("<br><br>");
-        return "<h2>" + escapeHtml(title) + "</h2><hr><br><div>" + paragraphs + "</div>";
+        var title = document.querySelector(".ne-h1, h3.theme-novel-title")?.textContent?.trim() || document.title.split(" | ")[0] || "Chapter";
+        var known = ${JSON.stringify(heading || {})};
+        return (${dcNovelReadableHtml.toString()})(title, text, known);
       }
       function check() {
         var text = String(window.__novelTTSText || "").trim();
@@ -1435,16 +1490,17 @@ class DefaultExtension extends MProvider {
   async getHtmlContent(name, url) {
     const base = await this._resolveBaseUrl();
     const target = this.siteUrl(base, url);
+    const heading = this._readerHeading(name, target);
     if (this._externalAuthEnabled()) {
       const deadline = Date.now() + this.domainRequestBudgetMs;
       const result = await this._withDomainFallback(target, `${base}/novel`,
-        async current => await this._externalAuthNovel(name, current, deadline),
+        async current => await this._externalAuthNovel(name, current, deadline, heading),
         {allowAuthenticatedServer:true});
       return result.value;
     }
     const result = await this._withDomainFallback(target, `${base}/novel`,
       async (current, currentReferer, context) => await this._localWebViewNovel(name, current, this._origin(current),
-        Math.min(context.candidate ? 20 : 35, context.remainingSeconds)));
+        Math.min(context.candidate ? 20 : 35, context.remainingSeconds), heading));
     return result.value;
   }
 
