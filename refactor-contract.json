@@ -1,0 +1,22 @@
+{
+  "toki31_novel.js": {
+    "filter labels, order and defaults": "4cc27110dd68ab3f49da906e486ef3a532b361f0cf9aa5177e7fbd54b99b224b",
+    "preference keys, labels and defaults": "ff130b01444fbde384eb1fe24d3846fb4edc07158bf686c51fc90a4c2f466794",
+    "all 1200 supported filter combinations": "ec0b4f80be71c28a388b6571035464bfb6ee1021755de01aa1242d6f01fc8698",
+    "invalid filters and saved-rule decoding": "31e66a51de18def2d154859ca15e96ee9ea6ac8185880d62625317c88acbb20a",
+    "search and all tab save/reset actions": "83b7590031a8b5513979c96ce7d9a7562a95a7512c17bffefd84aa482b07dab1",
+    "list selector order, duplicate removal and covers": "fd508f4883deb1c8c92345793b0a3f573c518d4d3db64c8d14df1568da36f3e3",
+    "official, custom, legacy and event card detail": "e9e1a1279a60ecd70a8adff613596228a2bc67beab02d9e1a1e26a93e0c57b03",
+    "escaped body, titles and paragraph formatting": "01e0cc28c2c166bb8681d3a518b62c3a03ef5d5ebc5c863214d2c054da733511"
+  },
+  "newtoki1_novel.js": {
+    "filter labels, order and defaults": "4cc27110dd68ab3f49da906e486ef3a532b361f0cf9aa5177e7fbd54b99b224b",
+    "preference keys, labels and defaults": "2072ee3d1227a6c3a83ff68feb10c82630387c53523719c4f7a28d611683af9e",
+    "all 1200 supported filter combinations": "ec0b4f80be71c28a388b6571035464bfb6ee1021755de01aa1242d6f01fc8698",
+    "invalid filters and saved-rule decoding": "31e66a51de18def2d154859ca15e96ee9ea6ac8185880d62625317c88acbb20a",
+    "search and all tab save/reset actions": "2ef32943ceaa9fdc6a5f21a9704212b94aa7b54b9fb1dd1c01570afeb32e8f7e",
+    "list selector order, duplicate removal and covers": "39d2554bbe688ec0e3755050ada89c55c86f57f672ed953cd8c6d4d0167a7bca",
+    "official, custom, legacy and event card detail": "fc2eefa8efa2da34ac7ed5f28b4ca9fc29f7c16851fbb90e015d955912a7d86d",
+    "escaped body, titles and paragraph formatting": "01e0cc28c2c166bb8681d3a518b62c3a03ef5d5ebc5c863214d2c054da733511"
+  }
+}

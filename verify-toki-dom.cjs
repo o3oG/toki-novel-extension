@@ -127,7 +127,7 @@ function leadingTrim(node){
  let sent='';local.window.__novelTTSText=text;local.window.flutter_inappwebview={callHandler:(_,v)=>sent=v};local.window.eval(bridge);
  check('local WebView uses the identical paragraph and heading formatter',()=>assert.equal(sent,'__TOKI31_OK__'+external));
  check('manifest contains matching source code, root URL and preserved ID',()=>{
-  const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));assert.equal(index[0].sourceCode,source);assert.equal(index[0].baseUrl,base);assert.equal(index[0].version,'0.2.23');assert.equal(index[0].id,780920260913901);
+  const index=JSON.parse(fs.readFileSync(__dirname+'/index.min.json','utf8'));assert.equal(index[0].sourceCode,source);assert.equal(index[0].baseUrl,base);assert.equal(index[0].version,'0.2.24');assert.equal(index[0].id,780920260913901);
  });
  d.window.close();x.window.close();local.window.close();
  console.log('PASS: '+count+' Toki reader DOM checks — separate headings, paragraph preservation, native indent cleaning, cached IDs, both reader modes, native WebView URL composition');

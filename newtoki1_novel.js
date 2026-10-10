@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.29",
+  version: "0.2.30",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/newtoki1_novel.js",
@@ -15,6 +15,45 @@ const mangayomiSources = [{
   appMinVerReq: "0.9.2",
   notes: "작품명/회차명 표시 · 문단 줄바꿈·한 칸 들여쓰기 · 글자 크기 문구 제거 · 작가·장르 별도 표시 · 태그 버튼 · 초기 완료 확인 단축 · 전체 목차 수집"
 }];
+
+const dcNovelFilterOptions = {
+  status: [
+    ["소설 (연재중)","ongoing"],
+    ["완결 소설","completed"]
+  ],
+  genre: [
+    ["전체",""],
+    ["판타지","fantasy"],
+    ["무협","wuxia"],
+    ["19금","adult19"],
+    ["현대","modern"],
+    ["로맨스","romance"],
+    ["로맨스 판타지","romance_fantasy"],
+    ["BL","bl"],
+    ["라노벨","light_novel"],
+    ["기타","etc"]
+  ],
+  platform: [
+    ["전체",""],
+    ["직접 업로드","user"],
+    ["노벨피아","novelpia"],
+    ["북토끼","booktoki"],
+    ["문피아","munpia"],
+    ["조아라","joara"],
+    ["카카오페이지","kakaopage"],
+    ["네이버 시리즈","series"],
+    ["리디북스","ridi"],
+    ["기타","etc"]
+  ],
+  sort: [
+    ["최신순","new"],
+    ["신작순","fresh"],
+    ["북마크순","hot"],
+    ["조회순","views"],
+    ["평점순","rating"],
+    ["화수순","episodes"]
+  ]
+};
 
 let tokiNovelDomainRequestActive = false;
 
@@ -106,11 +145,81 @@ function dcResolveListCardManifest(data, scope, tab) {
   };
 }
 
+function dcNovelDomReader(expectedUrl) {
+  const href = String(location.href || '').split(/[?#]/)[0].replace(/\/$/, '');
+  const wanted = String(expectedUrl || '').split(/[?#]/)[0].replace(/\/$/, '');
+  const base = {href, allImages: document.images.length, viewport: innerHeight,
+    documentHeight: document.documentElement.scrollHeight};
+  const finish = value => JSON.stringify(Object.assign(base, value));
+  if (href !== wanted) return finish({error:'novel_page_mismatch'});
+  if (document.querySelector('#challenge-form, #cf-challenge-running') ||
+      /just a moment|verify you are human|verifying you are human/i.test(document.title))
+    return finish({text:'', structure:'challenge'});
+  const gate = document.querySelector('[data-novel-unlock-status], .novel-gate, .novel-error, .novel-viewer [role=alert]');
+  if (gate && /로그인|구매|결제|포인트|잠긴|이용할 수 없는|sign in|payment|unlock/i.test(gate.textContent || ''))
+    return finish({error:'manual_login_or_paid_content'});
+  const heading = document.querySelector('h3.theme-novel-title, .ne-h1, .novel-viewer h1');
+  const viewer = document.querySelector('.novel-viewer, [data-novel-content], .theme-novel-content');
+  const title = (heading && heading.textContent || document.title || '').trim();
+  const forbidden = 'script, style, nav, form, footer, header, aside, button, iframe, .comment-media, .view-comment, .serial-list, .theme-episode-pager, .theme-comment-pager, [role=alert]';
+  function visibleText(root) {
+    if (!root) return '';
+    if (root.innerText && !root.querySelector("h1, h2, h3, h4, " + forbidden)) return root.innerText.replace(/\r\n?/g, '\n').trim();
+    const lines = [];
+    function visit(node) {
+      if (node.nodeType === 3) {lines.push(node.textContent || ''); return;}
+      if (node.nodeType !== 1 && node.nodeType !== 11) return;
+      if (node.nodeType === 1 && node.matches(forbidden + ", h1, h2, h3, h4") || node.hidden) return;
+      if (node.nodeType === 1 && node.tagName === 'BR') {lines.push('\n'); return;}
+      for (const child of node.childNodes || []) visit(child);
+      if (node.nodeType === 1 && /^(P|DIV|SECTION)$/.test(node.tagName)) lines.push('\n');
+    }
+    visit(root);return lines.join('').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  function shadowRoot(node) {
+    if (!node) return null;
+    if (node.shadowRoot || node.__novelShadow) return node.shadowRoot || node.__novelShadow;
+    for (const child of Array.from(node.querySelectorAll('*')).slice(0, 100))
+      if (child.shadowRoot || child.__novelShadow) return child.shadowRoot || child.__novelShadow;
+    return node;
+  }
+  const inspected = [], results = [];
+  function inspect(node, trusted) {
+    if (!node || /^(BODY|HTML|MAIN|ARTICLE)$/.test(node.tagName || '') || node.matches(forbidden) ||
+        (!trusted && node.querySelector(forbidden + ', h1, h2, h3, h4, a[href]'))) return;
+    const root = shadowRoot(node), text = visibleText(root);
+    const lines = text.split('\n').filter(line => line.trim());
+    inspected.push((node.tagName || '') + '#' + (node.id || '').replace(/[^\w-]/g,'').slice(0,60)
+      + '.' + String(node.className || '').replace(/[^\w .-]/g,'').slice(0,100)
+      + ':chars=' + text.length + ':lines=' + lines.length + ':shadow=' + (root !== node));
+    const minimum = trusted ? 31 : 300;
+    if (text.length >= minimum && (trusted || lines.length >= 6)) results.push({text, node});
+  }
+  if (viewer) inspect(viewer, true);
+  // Older layouts use a title followed by an unlabelled text/BR container.
+  // Inspect only adjacent containers; never use document.body as novel text.
+  if (!results.length && heading) {
+    let parent = heading;
+    for (let level=0; parent && level<3; level++,parent=parent.parentElement) {
+      if (/^(BODY|HTML|MAIN|ARTICLE)$/.test(parent.tagName || '')) break;
+      let node=parent.nextElementSibling;
+      for (let n=0; node && n<4; n++,node=node.nextElementSibling) {
+        if (/^(NAV|FORM|FOOTER|ASIDE)$/.test(node.tagName || '')) break;
+        inspect(node, false);
+      }
+    }
+  }
+  // Conflicting candidates require manual diagnosis, not a guessed chapter.
+  const distinct = Array.from(new Set(results.map(result => result.text)));
+  if (distinct.length === 1) return finish({text:distinct[0], title, structure:'scoped_reader'});
+  return finish({text:'', title, structure:(distinct.length > 1 ? 'ambiguous:' : 'unrecognized:')
+    + 'heading=' + !!heading + ';viewer=' + !!viewer + ';' + inspected.slice(0,8).join(';')});
+}
+
 class DefaultExtension extends MProvider {
   constructor() {
     super();
     this.fallbackBaseUrl = "https://newtoki1.org";
-    this.signalUrl = "https://wankyo83.github.io/tokki-traffic-light/domains.json";
     this.assetBaseUrl = "https://dc-toki-mangayomi-novel.pages.dev";
     this.eventManifestUrl = this.assetBaseUrl + "/assets/official-event-card.json";
     this.cardManifestUrl = this.assetBaseUrl + "/assets/official-random-cards.json";
@@ -123,12 +232,10 @@ class DefaultExtension extends MProvider {
     this.domainRequestBudgetMs = 120000;
     this.listRequestBudgetMs = 20000;
     this.domainScanCooldownMs = 60000;
-    this.domainCacheMs = 10 * 60 * 1000;
     this.pageSize = 49;
     this.requestSequence = 0;
     this.novelMetadata = new Map();
     this.diagnosticReports = new Map();
-    this.fallbackCover = this.assetBaseUrl + "/cover/auto-novel-1.png";
   }
 
   get supportsLatest() {
@@ -422,7 +529,7 @@ class DefaultExtension extends MProvider {
       this._checkListBudget();
       const remaining = Math.floor((Math.min(deadline, this._listContext?.deadline || deadline) - Date.now()) / 1000);
       if (remaining < 1) throw this._listTimeoutError();
-      const report = "v0.2.29 · Rhttp 연결 실패 → Dart HTTP 1회\n경로: " + this._safeReportUrl(url)
+      const report = "v0.2.30 · Rhttp 연결 실패 → Dart HTTP 1회\n경로: " + this._safeReportUrl(url)
         + "\n최초 오류: " + this._safeError(reason);
       this._saveReport("transport", report);
       try {
@@ -655,37 +762,23 @@ class DefaultExtension extends MProvider {
   }
 
   listFromDocument(doc, base) {
-    const list = [];
-    const seen = new Set();
-
-    for (const element of doc.select("a.novel-card")) {
-      const link = this.siteUrl(base, element.getHref || element.attr("href"));
-      if (!link || seen.has(link)) continue;
-      const name = this.firstText(element, ".nv-title");
-      if (!name) continue;
-      seen.add(link);
-      list.push({
-        name,
-        link,
-        imageUrl: this.firstImage(element, ".nv-thumb img", name)
-      });
+    const list = [], seen = new Set();
+    const groups = [
+      ["a.novel-card", ".nv-title", ".nv-thumb img", false],
+      [".search-results-grid > a.card", ".subject", ".thumb img", true]
+    ];
+    for (const [selector, titleSelector, imageSelector, checkPath] of groups) {
+      for (const element of doc.select(selector)) {
+        const rawLink = element.getHref || element.attr("href");
+        if (checkPath && !/^\/?novel\/\d+/.test(rawLink || "")) continue;
+        const link = this.siteUrl(base, rawLink);
+        if (!link || seen.has(link)) continue;
+        const name = this.firstText(element, titleSelector);
+        if (!name) continue;
+        seen.add(link);
+        list.push({ name, link, imageUrl: this.firstImage(element, imageSelector, name) });
+      }
     }
-
-    for (const element of doc.select(".search-results-grid > a.card")) {
-      const rawLink = element.getHref || element.attr("href");
-      if (!/^\/?novel\/\d+/.test(rawLink || "")) continue;
-      const link = this.siteUrl(base, rawLink);
-      if (seen.has(link)) continue;
-      const name = this.firstText(element, ".subject");
-      if (!name) continue;
-      seen.add(link);
-      list.push({
-        name,
-        link,
-        imageUrl: this.firstImage(element, ".thumb img", name)
-      });
-    }
-
     return list;
   }
 
@@ -717,7 +810,7 @@ class DefaultExtension extends MProvider {
 
   novelFromApi(base, item) {
     const id = this._text(item?.id);
-    const name = this._cleanNovelLabel(item?.title || ("\uC18C\uC124 " + id));
+    const name = this._cleanNovelLabel(item?.title || ("소설 " + id));
     return {
       name,
       link: `${this._trimSlash(base)}/novel/${encodeURIComponent(id)}`,
@@ -744,7 +837,7 @@ class DefaultExtension extends MProvider {
     catch (error) {
       const detail = this._text(error?.message || error);
       const cause = /InvalidContentType/.test(detail) ? "InvalidContentType" : error?.authenticationRequired ? "AUTH_REQUIRED" : error?.statusCode ? "HTTP " + error.statusCode : error?.listDeadline ? "20초 초과" : "연결 오류";
-      this._saveReport("api", "v0.2.29 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
+      this._saveReport("api", "v0.2.30 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
       throw error;
     }
     base = this._origin(result.url);
@@ -752,15 +845,15 @@ class DefaultExtension extends MProvider {
     let data;
     try { data = JSON.parse(body); }
     catch (_) {
-      this._saveReport("api", "v0.2.29 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
-      throw new Error("newtoki1.org 소설 v0.2.29 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
+      this._saveReport("api", "v0.2.30 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
+      throw new Error("newtoki1.org 소설 v0.2.30 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
     }
     if (!Array.isArray(data?.novels)) {
-      this._saveReport("api", "v0.2.29 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
-      throw new Error("newtoki1.org 소설 구조 진단 v0.2.29 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      this._saveReport("api", "v0.2.30 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      throw new Error("newtoki1.org 소설 구조 진단 v0.2.30 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
     }
     const novels = data.novels;
-    this._saveReport("api", "v0.2.29 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
+    this._saveReport("api", "v0.2.30 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
     const list = novels.map((item) => this.novelFromApi(base, item));
     await this._hydrateCovers(list, base);
     this._rememberNovels(list);
@@ -841,7 +934,7 @@ class DefaultExtension extends MProvider {
       if (!/^https:\/\//i.test(imageUrl)) return null;
       const revision = this._text(data.revision).trim();
       if (revision) imageUrl += (imageUrl.includes("?") ? "&" : "?") + "revision=" + encodeURIComponent(revision);
-      return { name: this.cleanText(data.name || data.title || "\uD2B9\uBCC4 \uC774\uBCA4\uD2B8"), imageUrl };
+      return { name: this.cleanText(data.name || data.title || "특별 이벤트"), imageUrl };
     } catch (_) {
       return null;
     }
@@ -928,7 +1021,7 @@ class DefaultExtension extends MProvider {
       const cards = await this._customCards(customSource);
       if (cards.length) {
         const index = this._nextCardIndex(cards.length, "custom", 0, customSource);
-        return { name: "\uC624\uB298\uC758 \uB3C5\uC11C", link: `/__newtoki1_novel_card__/custom-${index}`, imageUrl: cards[index - 1] };
+        return { name: "오늘의 독서", link: `/__newtoki1_novel_card__/custom-${index}`, imageUrl: cards[index - 1] };
       }
     }
     const event = await this._activeEventCard();
@@ -943,11 +1036,6 @@ class DefaultExtension extends MProvider {
     };
   }
 
-  async _prependCard(result, page, tab) {
-    if (Number(page) !== 1) return result;
-    return { list: [await this._tabCard(tab)].concat(result.list || []), hasNextPage: result.hasNextPage === true };
-  }
-
   _defaultPopularRule() {
     return { mode: "rank", status: "ongoing", genre: "", platform: "", sort: "hot" };
   }
@@ -956,19 +1044,19 @@ class DefaultExtension extends MProvider {
     return { mode: "filter", status: "ongoing", genre: "", platform: "", sort: "new" };
   }
 
-  _allowedRuleValue(value, allowed, fallback) {
+  _allowedRuleValue(value, pairs, fallback) {
     const text = this._text(value);
-    return allowed.includes(text) ? text : fallback;
+    return pairs.some(([, option]) => option === text) ? text : fallback;
   }
 
   _normalizeRule(rule, fallback) {
     const source = rule || fallback || this._defaultLatestRule();
     return {
       mode: source.mode === "rank" ? "rank" : "filter",
-      status: this._allowedRuleValue(source.status, ["ongoing", "completed"], "ongoing"),
-      genre: this._allowedRuleValue(source.genre, ["", "fantasy", "wuxia", "adult19", "modern", "romance", "romance_fantasy", "bl", "light_novel", "etc"], ""),
-      platform: this._allowedRuleValue(source.platform, ["", "user", "novelpia", "booktoki", "munpia", "joara", "kakaopage", "series", "ridi", "etc"], ""),
-      sort: this._allowedRuleValue(source.sort, ["new", "fresh", "hot", "views", "rating", "episodes"], "new")
+      status: this._allowedRuleValue(source.status, dcNovelFilterOptions.status, "ongoing"),
+      genre: this._allowedRuleValue(source.genre, dcNovelFilterOptions.genre, ""),
+      platform: this._allowedRuleValue(source.platform, dcNovelFilterOptions.platform, ""),
+      sort: this._allowedRuleValue(source.sort, dcNovelFilterOptions.sort, "new")
     };
   }
 
@@ -995,13 +1083,9 @@ class DefaultExtension extends MProvider {
 
   _ruleSummary(rule) {
     const value = this._normalizeRule(rule, this._defaultLatestRule());
-    if (value.mode === "rank") return "6\uC2DC\uAC04 \uC18C\uC124 TOP 50";
-    return [
-      this._ruleName(value.status, [["\uC18C\uC124 (\uC5F0\uC7AC\uC911)", "ongoing"], ["\uC644\uACB0 \uC18C\uC124", "completed"]], "\uC18C\uC124 (\uC5F0\uC7AC\uC911)"),
-      this._ruleName(value.genre, [["\uC804\uCCB4", ""], ["\uD310\uD0C0\uC9C0", "fantasy"], ["\uBB34\uD611", "wuxia"], ["19\uAE08", "adult19"], ["\uD604\uB300", "modern"], ["\uB85C\uB9E8\uC2A4", "romance"], ["\uB85C\uB9E8\uC2A4 \uD310\uD0C0\uC9C0", "romance_fantasy"], ["BL", "bl"], ["\uB77C\uB178\uBCA8", "light_novel"], ["\uAE30\uD0C0", "etc"]], "\uC804\uCCB4"),
-      this._ruleName(value.platform, [["\uC804\uCCB4", ""], ["\uC9C1\uC811 \uC5C5\uB85C\uB4DC", "user"], ["\uB178\uBCA8\uD53C\uC544", "novelpia"], ["\uBD81\uD1A0\uB07C", "booktoki"], ["\uBB38\uD53C\uC544", "munpia"], ["\uC870\uC544\uB77C", "joara"], ["\uCE74\uCE74\uC624\uD398\uC774\uC9C0", "kakaopage"], ["\uB124\uC774\uBC84 \uC2DC\uB9AC\uC988", "series"], ["\uB9AC\uB514\uBD81\uC2A4", "ridi"], ["\uAE30\uD0C0", "etc"]], "\uC804\uCCB4"),
-      this._ruleName(value.sort, [["\uCD5C\uC2E0\uC21C", "new"], ["\uC2E0\uC791\uC21C", "fresh"], ["\uBD81\uB9C8\uD06C\uC21C", "hot"], ["\uC870\uD68C\uC21C", "views"], ["\uD3C9\uC810\uC21C", "rating"], ["\uD654\uC218\uC21C", "episodes"]], "\uCD5C\uC2E0\uC21C")
-    ].join(" + ");
+    if (value.mode === "rank") return "6시간 소설 TOP 50";
+    return Object.entries(dcNovelFilterOptions).map(([field, pairs]) =>
+      this._ruleName(value[field], pairs, pairs[0][0])).join(" + ");
   }
 
   async _rankList(page) {
@@ -1122,13 +1206,9 @@ class DefaultExtension extends MProvider {
     if (!this.cleanText(query) && Number(page) === 1) {
       const action = Number(this._filterValue(filters, "tabRuleAction", "0"));
       const preferences = new SharedPreferences();
-      if (action === 1) preferences.setString(this.popularRulePreference, this._encodeRule(rule));
-      else if (action === 2) preferences.setString(this.latestRulePreference, this._encodeRule(rule));
-      else if (action === 3) preferences.setString(this.popularRulePreference, "");
-      else if (action === 4) preferences.setString(this.latestRulePreference, "");
-      else if (action === 5) {
-        preferences.setString(this.popularRulePreference, "");
-        preferences.setString(this.latestRulePreference, "");
+      for (const [key, save, reset] of [[this.popularRulePreference, 1, 3], [this.latestRulePreference, 2, 4]]) {
+        if (action === save) preferences.setString(key, this._encodeRule(rule));
+        else if (action === reset || action === 5) preferences.setString(key, "");
       }
     }
     return this.loadApiList(page, rule, this.cleanText(query));
@@ -1221,7 +1301,7 @@ class DefaultExtension extends MProvider {
         if (error?.authenticationRequired || error?.listDeadline) break;
       }
     }
-    this._saveReport("covers", "v0.2.29 · 표지 확인 · 실제 표지=" + list.filter(item => this._realCover(item.imageUrl)).length
+    this._saveReport("covers", "v0.2.30 · 표지 확인 · 실제 표지=" + list.filter(item => this._realCover(item.imageUrl)).length
       + "/" + list.length + "\n표지 미확인 작품:\n" + list.filter(item => !this._realCover(item.imageUrl))
         .map(item => item.name + " · " + this._safeReportUrl(item.link)).join("\n"));
     return list;
@@ -1495,7 +1575,7 @@ class DefaultExtension extends MProvider {
       }
     } catch (_) {}
     const signatures = new Set(Array.from(pages.values()).map(list => list.map(ch => ch.url).join("|")).filter(Boolean));
-    const record = () => this._saveReport("toc", "v0.2.29 · 목차 페이지 수집\n작품: " + this._safeReportUrl(target)
+    const record = () => this._saveReport("toc", "v0.2.30 · 목차 페이지 수집\n작품: " + this._safeReportUrl(target)
       + "\n완료 페이지: " + Array.from(pages.keys()).sort((a,b) => a-b).join(", ")
       + "\n예상 페이지: " + expected + "\n수집 회차: " + Array.from(pages.values()).reduce((sum, list) => sum + list.length, 0)
       + "\n실패 페이지:\n" + Array.from(failed.entries()).map(([page, reason]) => (page === 0 ? "전체 범위" : page + "페이지") + " · " + reason).join("\n"));
@@ -1648,7 +1728,7 @@ class DefaultExtension extends MProvider {
       } catch (_) { this._saveReport("bodyStructure", "실패 회차의 HTTP 구조를 읽지 못했습니다. WebView 인증 상태와 서버의 본문 추출 구조를 확인해야 합니다."); }
     }
     const text = ["body", "bodyStructure", "detailRequest", "toc", "tocHistory", "metadata", "covers", "api", "transport", "detail", "rank"].map(stage => this._report(stage)).filter(Boolean).join("\n\n");
-    return { name: "newtoki1.org 소설 진단 v0.2.29", link: url, imageUrl: this.generatedCover("diagnostics"), description: text ? "현재 확장 v0.2.29 · 각 기록의 버전은 오류 당시 실행 버전입니다. 본문 기록을 갱신하려면 해당 회차를 다시 열어 주세요.\n\n" + text : "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
+    return { name: "newtoki1.org 소설 진단 v0.2.30", link: url, imageUrl: this.generatedCover("diagnostics"), description: text ? "현재 확장 v0.2.30 · 각 기록의 버전은 오류 당시 실행 버전입니다. 본문 기록을 갱신하려면 해당 회차를 다시 열어 주세요.\n\n" + text : "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
   }
 
   _siteStructureError(stage, url, html, parsedDoc) {
@@ -1660,7 +1740,7 @@ class DefaultExtension extends MProvider {
     const links = doc.select("a[href]").filter(node => /\/novel(?:\/|$)/.test(this._text(node.getHref || node.attr("href")))).slice(0, 6).map(node => safePath(node.getHref || node.attr("href")) + " class=" + short(node.attr("class")));
     const containers = doc.select("[class]").map(node => short(node.attr("class"))).filter(value => /novel|episode|chapter|rank|detail|book|list/i.test(value));
     const unique = Array.from(new Set(containers)).slice(0, 12);
-    return new Error("newtoki1.org 소설 구조 진단 v0.2.29 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
+    return new Error("newtoki1.org 소설 구조 진단 v0.2.30 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
   }
 
   async getDetail(url) {
@@ -1678,22 +1758,22 @@ class DefaultExtension extends MProvider {
         item = official.cards[index - 1] || official.cards[0];
       } else if (reading) {
         const index = Math.min(7, Math.max(1, Number(reading[1]) || 1));
-        item = { name: "\uC624\uB298\uC758 \uB3C5\uC11C", imageUrl: `${this.assetBaseUrl}/card/novel-reading-${String(index).padStart(2, "0")}.gif` };
+        item = { name: "오늘의 독서", imageUrl: `${this.assetBaseUrl}/card/novel-reading-${String(index).padStart(2, "0")}.gif` };
       } else if (custom) {
         const cards = await this._customCards(this._customCardSource());
         const index = Math.max(1, Number(custom[1]) || 1);
-        if (cards[index - 1]) item = { name: "\uC624\uB298\uC758 \uB3C5\uC11C", imageUrl: cards[index - 1] };
+        if (cards[index - 1]) item = { name: "오늘의 독서", imageUrl: cards[index - 1] };
       } else if (key === "event") {
         item = await this._activeEventCard();
       }
-      if (!item) item = { name: "\uC624\uB298\uC758 \uB3C5\uC11C", imageUrl: `${this.assetBaseUrl}/card/novel-reading-01.gif` };
+      if (!item) item = { name: "오늘의 독서", imageUrl: `${this.assetBaseUrl}/card/novel-reading-01.gif` };
       return {
         name: item.name,
         link: this._text(url),
         imageUrl: item.imageUrl,
-        description: "\uBAA9\uB85D\uC744 \uAD6C\uBD84\uD558\uB294 \uACF5\uC6A9 \uB3C5\uC11C \uC548\uB0B4 \uCE74\uB4DC\uC785\uB2C8\uB2E4. \uB4A4\uB85C \uB3CC\uC544\uAC00 \uC791\uD488\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.",
-        genre: [cardMatch[1] === "event" ? "\uC774\uBCA4\uD2B8 \uC548\uB0B4" : "\uB3C5\uC11C \uCE74\uB4DC"],
-        author: "\uD1A0\uB07C \uC18C\uC124",
+        description: "목록을 구분하는 공용 독서 안내 카드입니다. 뒤로 돌아가 작품을 선택해 주세요.",
+        genre: [cardMatch[1] === "event" ? "이벤트 안내" : "독서 카드"],
+        author: "토끼 소설",
         artist: "",
         status: 0,
         chapters: []
@@ -1706,9 +1786,9 @@ class DefaultExtension extends MProvider {
     let result;
     try {
       result = await this._requestResult(target, `${base}/novel`, 45);
-      this._saveReport("detailRequest", "v0.2.29 · 작품 상세 연결 성공\n작품: " + this._safeReportUrl(result.url));
+      this._saveReport("detailRequest", "v0.2.30 · 작품 상세 연결 성공\n작품: " + this._safeReportUrl(result.url));
     } catch (error) {
-      const report = "v0.2.29 · 작품 상세 연결 실패\n작품: " + this._safeReportUrl(target) + "\n오류: " + this._safeError(error);
+      const report = "v0.2.30 · 작품 상세 연결 실패\n작품: " + this._safeReportUrl(target) + "\n오류: " + this._safeError(error);
       this._saveReport("detailRequest", report);
       throw new Error(report + "\n::진단 검색에서 전체 기록을 확인하세요.");
     }
@@ -1723,7 +1803,6 @@ class DefaultExtension extends MProvider {
     const name = this._cleanNovelLabel(commonTitle ? (cached.name || "[작품명 확인 필요]") : (pageTitle || cached.name || "[작품명 확인 필요]"));
     let description = this.firstText(root, ".nd-desc") || doc.selectFirst('meta[name="description"]')?.attr("content") || "";
     const {author, genre, status} = this._detailMetadata(doc, root);
-    const ogCover = doc.selectFirst('meta[property="og:image"]')?.attr("content");
     const imageUrl = this._detailCover(doc, base) || cached.imageUrl || this.generatedCover(target);
     this._rememberNovels([{name, link: target.split(/[?#]/)[0], imageUrl}]);
     const chapters = [];
@@ -1745,7 +1824,7 @@ class DefaultExtension extends MProvider {
       const isNotReady = this.hasElement(row, ".ep-badge-not-ready") || /novel-ep--not-ready/.test(rowClass);
       const gateMode = this._text(anchor?.attr("data-novel-episode-gate"));
       const isPaid = this.hasElement(row, ".ep-badge-paid, .ne-unlock-cost") || /novel-ep--paid/.test(rowClass) || this.isPaidGate(gateMode) || /(?:\uD83D\uDC8E|\uD83D\uDD12|\uC720\uB8CC|\uD3EC\uC778\uD2B8|\uACB0\uC81C|\d+P)/.test(rowText);
-      const markers = [isNotReady ? "\u23F3 \uC900\uBE44\uC911" : "", isPaid ? "\uD83D\uDD12 \uC720\uB8CC" : ""].filter(Boolean).join(" ");
+      const markers = [isNotReady ? "⏳ 준비중" : "", isPaid ? "🔒 유료" : ""].filter(Boolean).join(" ");
       const episodeNumber = this._episodeNumber(number, row) || (number.match(/^\s*(\d+(?:\.\d+)?)(?:화|회)?\s*$/) || [])[1] || "";
       chapters.push({
         name: this._chapterName(`${markers ? markers + " · " : ""}${title || number}`, episodeNumber),
@@ -1763,7 +1842,7 @@ class DefaultExtension extends MProvider {
         for (const chapter of this._chaptersFromNovelLinks(doc, base, novelId)) chapters.push(chapter);
         if (chapters.length) {
           description = "[목차 범위 확인 필요] 연재 목록 영역을 확인하지 못해 일부 회차만 표시될 수 있습니다. 진단 기록의 작품 주소와 연재 목록 구조를 확인하세요.\n\n" + description;
-          this._saveReport("toc", "v0.2.29 · 연재 목록 영역 미확인\n작품: " + this._safeReportUrl(target) + "\n수집 회차: " + chapters.length + "\n완료 여부: 확인 필요");
+          this._saveReport("toc", "v0.2.30 · 연재 목록 영역 미확인\n작품: " + this._safeReportUrl(target) + "\n수집 회차: " + chapters.length + "\n완료 여부: 확인 필요");
         }
       }
       for (const chapter of chapters) chapterIds.add(chapter.url.split("/").pop());
@@ -1803,11 +1882,11 @@ class DefaultExtension extends MProvider {
           const episodeId = String(item?.id || "");
           if (!episodeId || chapterIds.has(episodeId)) continue;
           chapterIds.add(episodeId);
-          const number = this.cleanText(item.episodeLabel || (item.number ? `${item.number}\uD654` : "\uD68C\uCC28"));
+          const number = this.cleanText(item.episodeLabel || (item.number ? `${item.number}\uD654` : "회차"));
           const title = this.cleanText(item.title || "");
           const markers = [
-            this.isTrueFlag(item.isNotReady) ? "\u23F3 \uC900\uBE44\uC911" : "",
-            this.isTrueFlag(item.isPaid) || this.isPaidGate(item.gateMode) ? "\uD83D\uDD12 \uC720\uB8CC" : ""
+            this.isTrueFlag(item.isNotReady) ? "⏳ 준비중" : "",
+            this.isTrueFlag(item.isPaid) || this.isPaidGate(item.gateMode) ? "🔒 유료" : ""
           ].filter(Boolean).join(" ");
           chapters.push({
             name: this._chapterName(`${markers ? markers + " · " : ""}${title || number}`, /^\d+(?:\.\d+)?$/.test(this._text(item.number)) ? this._text(item.number) : this._episodeNumber(number)),
@@ -1828,7 +1907,7 @@ class DefaultExtension extends MProvider {
       // The native detail page clips error toasts. Put diagnostics in its
       // expandable description so the user can read the complete report.
       description = "[목차 추출 실패 — 아래 진단 정보를 공유해 주세요]\n" + this._siteStructureError("작품 상세·목차", target, result.value).message + (description ? "\n\n" + description : "");
-      this._saveReport("toc", "v0.2.29 · 목차 추출 실패\n작품: " + this._safeReportUrl(target) + "\n수집 회차: 0\n완료 여부: 확인 필요");
+      this._saveReport("toc", "v0.2.30 · 목차 추출 실패\n작품: " + this._safeReportUrl(target) + "\n수집 회차: 0\n완료 여부: 확인 필요");
     }
     if (serialResult) {
       if (serialResult.complete) description = "[목차 수집 완료] " + serialResult.pageCount + "페이지 · " + chapters.length + "개 항목\n[목차 순번]은 사이트 회차 번호를 우선 사용합니다. 번호가 없는 항목만 전체 목록의 읽기 순서로 표시하며 외전·후기도 포함합니다.\n\n" + description;
@@ -1844,7 +1923,7 @@ class DefaultExtension extends MProvider {
     const fields = doc.select(".view-title dt, .view-title th, .view-title td, .view-title span, .view-title strong, .view-title div")
       .filter(node => ["작가", "저자", "장르", "발행구분", "연재상태"].includes(this.cleanText(node.text).replace(/[\s:：]/g, "")))
       .slice(0, 8).map(node => this.cleanText(node.text) + " → " + this.cleanText(node.nextElementSibling?.text).slice(0, 300));
-    this._saveReport("metadata", "v0.2.29 · 작품 정보\n작품: " + this._safeReportUrl(target) + "\n작가: " + (author || "확인 필요") + "\n장르: " + (genre.join(", ") || "확인 필요")
+    this._saveReport("metadata", "v0.2.30 · 작품 정보\n작품: " + this._safeReportUrl(target) + "\n작가: " + (author || "확인 필요") + "\n장르: " + (genre.join(", ") || "확인 필요")
       + "\n메타데이터 항목: " + (fields.join("; ") || "인접 항목 확인 필요")
       + "\n업로드 날짜 확인: " + dated.length + "/" + chapters.length
       + "\n날짜 표본 (한국 날짜): " + dated.slice(0, 3).map(chapter => chapter.name + "=" + new Date(Number(chapter.dateUpload) + 9 * 3600000).toISOString().slice(0, 10)).join("; "));
@@ -1869,9 +1948,9 @@ class DefaultExtension extends MProvider {
 
   _externalAuthEndpoint() {
     const raw = this._trimSlash(this._preference("newtoki1_novel_external_auth_endpoint", ""));
-    if (!raw) throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC8FC\uC18C\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
+    if (!raw) throw new Error("외부인증 서버 주소가 비어 있습니다.");
     if (!/^https?:\/\/(?:\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d{1,5})?$/i.test(raw)) {
-      throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC8FC\uC18C \uD615\uC2DD\uC774 \uC798\uBABB\uB410\uC2B5\uB2C8\uB2E4.");
+      throw new Error("외부인증 서버 주소 형식이 잘못됐습니다.");
     }
     return raw;
   }
@@ -1892,18 +1971,18 @@ class DefaultExtension extends MProvider {
         ? await client.get(endpoint + path, this._externalAuthHeaders(false))
         : await client.post(endpoint + path, this._externalAuthHeaders(true), body);
       if ([401, 403].indexOf(Number(response.statusCode)) >= 0) {
-        throw new Error("\uC811\uC18D \uD0A4\uAC00 \uD2C0\uB838\uAC70\uB098 \uC11C\uBC84 \uC124\uC815\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
+        throw new Error("접속 키가 틀렸거나 서버 설정과 다릅니다.");
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         if (ignoreFailure) return {};
-        throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC694\uCCAD \uC2E4\uD328 (HTTP " + response.statusCode + ").");
+        throw new Error("외부인증 서버 요청 실패 (HTTP " + response.statusCode + ").");
       }
       return JSON.parse(this._text(response.body));
     } catch (error) {
       if (ignoreFailure) return {};
       const detail = this._text(error && (error.message || error));
       if (/\uC811\uC18D \uD0A4|\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC694\uCCAD/.test(detail)) throw error;
-      throw new Error("\uC678\uBD80\uC778\uC99D \uC11C\uBC84\uC5D0 \uC5F0\uACB0\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC8FC\uC18C, \uD3EC\uD2B8, \uBC29\uD654\uBCBD\uC744 \uD655\uC778\uD558\uC138\uC694.");
+      throw new Error("외부인증 서버에 연결할 수 없습니다. 주소, 포트, 방화벽을 확인하세요.");
     }
   }
 
@@ -2016,7 +2095,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      throw new Error("외부인증 진단 v0.2.29 | stage=" + stage
+      throw new Error("외부인증 진단 v0.2.30 | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
@@ -2025,7 +2104,7 @@ class DefaultExtension extends MProvider {
   }
 
   _novelDomReader() {
-    return "(function (expectedUrl) {\n  const href = String(location.href || '').split(/[?#]/)[0].replace(/\\/$/, '');\n  const wanted = String(expectedUrl || '').split(/[?#]/)[0].replace(/\\/$/, '');\n  const base = {href, allImages: document.images.length, viewport: innerHeight,\n    documentHeight: document.documentElement.scrollHeight};\n  const finish = value => JSON.stringify(Object.assign(base, value));\n  if (href !== wanted) return finish({error:'novel_page_mismatch'});\n  if (document.querySelector('#challenge-form, #cf-challenge-running') ||\n      /just a moment|verify you are human|verifying you are human/i.test(document.title))\n    return finish({text:'', structure:'challenge'});\n  const gate = document.querySelector('[data-novel-unlock-status], .novel-gate, .novel-error, .novel-viewer [role=alert]');\n  if (gate && /로그인|구매|결제|포인트|잠긴|이용할 수 없는|sign in|payment|unlock/i.test(gate.textContent || ''))\n    return finish({error:'manual_login_or_paid_content'});\n  const heading = document.querySelector('h3.theme-novel-title, .ne-h1, .novel-viewer h1');\n  const viewer = document.querySelector('.novel-viewer, [data-novel-content], .theme-novel-content');\n  const title = (heading && heading.textContent || document.title || '').trim();\n  const forbidden = 'script, style, nav, form, footer, header, aside, button, iframe, .comment-media, .view-comment, .serial-list, .theme-episode-pager, .theme-comment-pager, [role=alert]';\n  function visibleText(root) {\n    if (!root) return '';\n    if (root.innerText && !root.querySelector(\"h1, h2, h3, h4, \" + forbidden)) return root.innerText.replace(/\\r\\n?/g, '\\n').trim();\n    const lines = [];\n    function visit(node) {\n      if (node.nodeType === 3) {lines.push(node.textContent || ''); return;}\n      if (node.nodeType !== 1 && node.nodeType !== 11) return;\n      if (node.nodeType === 1 && node.matches(forbidden + \", h1, h2, h3, h4\") || node.hidden) return;\n      if (node.nodeType === 1 && node.tagName === 'BR') {lines.push('\\n'); return;}\n      for (const child of node.childNodes || []) visit(child);\n      if (node.nodeType === 1 && /^(P|DIV|SECTION)$/.test(node.tagName)) lines.push('\\n');\n    }\n    visit(root);return lines.join('').replace(/\\n{3,}/g, '\\n\\n').trim();\n  }\n  function shadowRoot(node) {\n    if (!node) return null;\n    if (node.shadowRoot || node.__novelShadow) return node.shadowRoot || node.__novelShadow;\n    for (const child of Array.from(node.querySelectorAll('*')).slice(0, 100))\n      if (child.shadowRoot || child.__novelShadow) return child.shadowRoot || child.__novelShadow;\n    return node;\n  }\n  const inspected = [], results = [];\n  function inspect(node, trusted) {\n    if (!node || /^(BODY|HTML|MAIN|ARTICLE)$/.test(node.tagName || '') || node.matches(forbidden) ||\n        (!trusted && node.querySelector(forbidden + ', h1, h2, h3, h4, a[href]'))) return;\n    const root = shadowRoot(node), text = visibleText(root);\n    const lines = text.split('\\n').filter(line => line.trim());\n    inspected.push((node.tagName || '') + '#' + (node.id || '').replace(/[^\\w-]/g,'').slice(0,60)\n      + '.' + String(node.className || '').replace(/[^\\w .-]/g,'').slice(0,100)\n      + ':chars=' + text.length + ':lines=' + lines.length + ':shadow=' + (root !== node));\n    const minimum = trusted ? 31 : 300;\n    if (text.length >= minimum && (trusted || lines.length >= 6)) results.push({text, node});\n  }\n  if (viewer) inspect(viewer, true);\n  // Older layouts use a title followed by an unlabelled text/BR container.\n  // Inspect only adjacent containers; never use document.body as novel text.\n  if (!results.length && heading) {\n    let parent = heading;\n    for (let level=0; parent && level<3; level++,parent=parent.parentElement) {\n      if (/^(BODY|HTML|MAIN|ARTICLE)$/.test(parent.tagName || '')) break;\n      let node=parent.nextElementSibling;\n      for (let n=0; node && n<4; n++,node=node.nextElementSibling) {\n        if (/^(NAV|FORM|FOOTER|ASIDE)$/.test(node.tagName || '')) break;\n        inspect(node, false);\n      }\n    }\n  }\n  // Conflicting candidates require manual diagnosis, not a guessed chapter.\n  const distinct = Array.from(new Set(results.map(result => result.text)));\n  if (distinct.length === 1) return finish({text:distinct[0], title, structure:'scoped_reader'});\n  return finish({text:'', title, structure:(distinct.length > 1 ? 'ambiguous:' : 'unrecognized:')\n    + 'heading=' + !!heading + ';viewer=' + !!viewer + ';' + inspected.slice(0,8).join(';')});\n})";
+    return dcNovelDomReader.toString();
   }
 
   async _localWebViewNovel(name, target, base, timeoutSeconds, heading) {
@@ -2039,9 +2118,6 @@ class DefaultExtension extends MProvider {
         if (delivered) return;
         delivered = true;
         window.flutter_inappwebview.callHandler("setResponse", String(value || ""));
-      }
-      function escapeHtml(value) {
-        return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
       }
       function makeHtml(text) {
         var title = document.querySelector("h3.theme-novel-title, .ne-h1")?.textContent?.trim() || ${JSON.stringify(name || "Chapter")};
@@ -2094,7 +2170,7 @@ class DefaultExtension extends MProvider {
     } catch (error) {
       const detail = this._text(error && (error.message || error));
       if (/String[^\n]{0,80}bool|subtype of type[^\n]{0,80}bool|as bool/i.test(detail)) {
-        throw new Error("\uD604\uC7AC Mangayomi \uBC84\uC804\uC758 WebView \uBB38\uC790\uC5F4 \uBC18\uD658 \uC624\uB958\uB85C \uCF58\uD150\uCE20\uB97C \uBC1B\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC678\uBD80\uC778\uC99D \uC11C\uBC84\uB97C \uC0AC\uC6A9\uD558\uAC70\uB098 Mangayomi \uC5C5\uB370\uC774\uD2B8\uB97C \uD655\uC778\uD558\uC138\uC694.");
+        throw new Error("현재 Mangayomi 버전의 WebView 문자열 반환 오류로 콘텐츠를 받을 수 없습니다. 외부인증 서버를 사용하거나 Mangayomi 업데이트를 확인하세요.");
       }
       if (/timeout|timed out/i.test(detail) && !/__TOKI31_ERR__HTTP_|__TOKI31_ERR__NETWORK/.test(detail)) {
         throw new Error("본문 WebView 응답을 확인하지 못했습니다. 해당 주소에서 인증 상태를 확인한 뒤 다시 시도하세요.");
@@ -2129,7 +2205,7 @@ class DefaultExtension extends MProvider {
             Math.min(context.candidate ? 20 : 35, context.remainingSeconds), heading));
         html = result.value;
       }
-      this._saveReport("body", "v0.2.29 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
+      this._saveReport("body", "v0.2.30 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
       this._setPreferenceString("newtoki1_novel_last_body_url", "");
       return html;
     } catch (error) {
@@ -2137,7 +2213,7 @@ class DefaultExtension extends MProvider {
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
       detail = detail.replace(/https?:\/\/[^\s|]+/g, value => this._safeReportUrl(value));
-      this._saveReport("body", "v0.2.29 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
+      this._saveReport("body", "v0.2.30 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
       this._setPreferenceString("newtoki1_novel_last_body_url", target.split(/[?#]/)[0]);
       throw new Error("회차: " + this.cleanText(name) + " | 경로=" + this._safeReportUrl(target) + "\n" + detail + "\n인기 목록의 [진단] 항목 또는 ::진단 검색에서 전체 기록을 확인하세요.");
     }
@@ -2164,17 +2240,9 @@ class DefaultExtension extends MProvider {
     return [];
   }
 
-  _option(name, value) {
-    return { type_name: "SelectOption", name, value };
-  }
-
   _select(type, name, pairs) {
-    return {
-      type,
-      name,
-      type_name: "SelectFilter",
-      values: pairs.map((pair) => this._option(pair[0], pair[1]))
-    };
+    return { type, name, type_name: "SelectFilter",
+      values: pairs.map(([name, value]) => ({ type_name: "SelectOption", name, value })) };
   }
 
   getFilterList() {
@@ -2183,57 +2251,25 @@ class DefaultExtension extends MProvider {
     const popular = this._tabRule(this.popularRulePreference, this._defaultPopularRule());
     const latest = this._tabRule(this.latestRulePreference, this._defaultLatestRule());
     return [
-      header("novelFilterHelp", "\uC81C\uBAA9 \uAC80\uC0C9\uACFC \uC544\uB798 \uC870\uAC74\uC744 \uD568\uAED8 \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."),
-      this._select("novelStatus", "\uBAA9\uB85D \uAD6C\uBD84", [
-        ["\uC18C\uC124 (\uC5F0\uC7AC\uC911)", "ongoing"],
-        ["\uC644\uACB0 \uC18C\uC124", "completed"]
-      ]),
-      this._select("novelGenre", "\uC7A5\uB974", [
-        ["\uC804\uCCB4", ""],
-        ["\uD310\uD0C0\uC9C0", "fantasy"],
-        ["\uBB34\uD611", "wuxia"],
-        ["19\uAE08", "adult19"],
-        ["\uD604\uB300", "modern"],
-        ["\uB85C\uB9E8\uC2A4", "romance"],
-        ["\uB85C\uB9E8\uC2A4 \uD310\uD0C0\uC9C0", "romance_fantasy"],
-        ["BL", "bl"],
-        ["\uB77C\uB178\uBCA8", "light_novel"],
-        ["\uAE30\uD0C0", "etc"]
-      ]),
-      this._select("novelPlatform", "\uD50C\uB7AB\uD3FC", [
-        ["\uC804\uCCB4", ""],
-        ["\uC9C1\uC811 \uC5C5\uB85C\uB4DC", "user"],
-        ["\uB178\uBCA8\uD53C\uC544", "novelpia"],
-        ["\uBD81\uD1A0\uB07C", "booktoki"],
-        ["\uBB38\uD53C\uC544", "munpia"],
-        ["\uC870\uC544\uB77C", "joara"],
-        ["\uCE74\uCE74\uC624\uD398\uC774\uC9C0", "kakaopage"],
-        ["\uB124\uC774\uBC84 \uC2DC\uB9AC\uC988", "series"],
-        ["\uB9AC\uB514\uBD81\uC2A4", "ridi"],
-        ["\uAE30\uD0C0", "etc"]
-      ]),
+      header("novelFilterHelp", "제목 검색과 아래 조건을 함께 사용할 수 있습니다."),
+      this._select("novelStatus", "목록 구분", dcNovelFilterOptions.status),
+      this._select("novelGenre", "장르", dcNovelFilterOptions.genre),
+      this._select("novelPlatform", "플랫폼", dcNovelFilterOptions.platform),
       separator("novelSortSeparator"),
-      this._select("novelSort", "\uC815\uB82C", [
-        ["\uCD5C\uC2E0\uC21C", "new"],
-        ["\uC2E0\uC791\uC21C", "fresh"],
-        ["\uBD81\uB9C8\uD06C\uC21C", "hot"],
-        ["\uC870\uD68C\uC21C", "views"],
-        ["\uD3C9\uC810\uC21C", "rating"],
-        ["\uD654\uC218\uC21C", "episodes"]
-      ]),
+      this._select("novelSort", "정렬", dcNovelFilterOptions.sort),
       separator("novelSaveSeparator"),
-      header("novelSaveHelp", "\uC870\uAC74\uC744 \uACE0\uB978 \uB4A4 Filter \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uACB0\uACFC\uB97C \uBCF4\uACE0 Popular/Latest \uD0ED \uADDC\uCE59\uC73C\uB85C \uC800\uC7A5\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."),
-      header("novelPopularSummary", "\uD604\uC7AC Popular: " + this._ruleSummary(popular)),
-      header("novelLatestSummary", "\uD604\uC7AC Latest: " + this._ruleSummary(latest)),
-      this._select("tabRuleAction", "Popular/Latest \uADDC\uCE59", [
-        ["\uC800\uC7A5\uD558\uC9C0 \uC54A\uC74C (\uD544\uD130 \uACB0\uACFC\uB9CC \uBCF4\uAE30)", "0"],
-        ["\uD604\uC7AC \uC870\uAC74\uC744 Popular \uD0ED\uC5D0 \uC800\uC7A5", "1"],
-        ["\uD604\uC7AC \uC870\uAC74\uC744 Latest \uD0ED\uC5D0 \uC800\uC7A5", "2"],
-        ["Popular \uD0ED\uC744 \uAE30\uBCF8\uAC12\uC73C\uB85C \uBCF5\uC6D0", "3"],
-        ["Latest \uD0ED\uC744 \uAE30\uBCF8\uAC12\uC73C\uB85C \uBCF5\uC6D0", "4"],
-        ["\uB450 \uD0ED \uBAA8\uB450 \uAE30\uBCF8\uAC12\uC73C\uB85C \uBCF5\uC6D0", "5"]
+      header("novelSaveHelp", "조건을 고른 뒤 Filter 버튼을 누르면 결과를 보고 Popular/Latest 탭 규칙으로 저장할 수 있습니다."),
+      header("novelPopularSummary", "현재 Popular: " + this._ruleSummary(popular)),
+      header("novelLatestSummary", "현재 Latest: " + this._ruleSummary(latest)),
+      this._select("tabRuleAction", "Popular/Latest 규칙", [
+        ["저장하지 않음 (필터 결과만 보기)", "0"],
+        ["현재 조건을 Popular 탭에 저장", "1"],
+        ["현재 조건을 Latest 탭에 저장", "2"],
+        ["Popular 탭을 기본값으로 복원", "3"],
+        ["Latest 탭을 기본값으로 복원", "4"],
+        ["두 탭 모두 기본값으로 복원", "5"]
       ]),
-      header("novelCardHelp", "\uB3C5\uC11C \uCE74\uB4DC\uB294 Popular/Latest \uCCAB \uD398\uC774\uC9C0\uC5D0\uB9CC \uD45C\uC2DC\uB418\uBA70 \uAC80\uC0C9\u00B7\uD544\uD130 \uACB0\uACFC\uC5D0\uB294 \uB098\uC624\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.")
+      header("novelCardHelp", "독서 카드는 Popular/Latest 첫 페이지에만 표시되며 검색·필터 결과에는 나오지 않습니다.")
     ];
   }
 
@@ -2242,58 +2278,58 @@ class DefaultExtension extends MProvider {
       {
         key: this.domainPreference,
         editTextPreference: {
-          title: "\uD1A0\uB07C \uC8FC\uC18C \uC9C1\uC811 \uC9C0\uC815 (\uC120\uD0DD)",
+          title: "토끼 주소 직접 지정 (선택)",
           summary: "빈 값이면 https://newtoki1.org를 사용합니다.",
           value: "",
-          dialogTitle: "\uD1A0\uB07C \uC18C\uC124 \uC8FC\uC18C",
-          dialogMessage: "https://\uB85C \uC2DC\uC791\uD558\uB294 \uC0AC\uC774\uD2B8 \uC8FC\uC18C\uB97C \uC785\uB825\uD558\uC138\uC694. \uC790\uB3D9 \uC8FC\uC18C\uB97C \uC4F0\uB824\uBA74 \uBE44\uC6CC \uB450\uC138\uC694."
+          dialogTitle: "토끼 소설 주소",
+          dialogMessage: "https://로 시작하는 사이트 주소를 입력하세요. 자동 주소를 쓰려면 비워 두세요."
         }
       },
       {
         key: this.customCardPreference,
         editTextPreference: {
-          title: "\uCEE4\uC2A4\uD140 \uB3C5\uC11C \uCE74\uB4DC (\uC120\uD0DD)",
-          summary: "\uAC1C\uC778 JSON \uC8FC\uC18C\uB85C \uC5EC\uB7EC \uC7A5\uC758 \uCE74\uB4DC\uB97C \uC124\uC815\uD569\uB2C8\uB2E4. 7\uC7A5 \uC81C\uD55C\uC740 \uC5C6\uC73C\uBA70, \uC124\uC815\uD558\uBA74 \uACF5\uC6A9 \uC774\uBCA4\uD2B8 \uCE74\uB4DC\uB294 \uD45C\uC2DC\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
+          title: "커스텀 독서 카드 (선택)",
+          summary: "개인 JSON 주소로 여러 장의 카드를 설정합니다. 7장 제한은 없으며, 설정하면 공용 이벤트 카드는 표시되지 않습니다.",
           value: "",
-          dialogTitle: "\uCEE4\uC2A4\uD140 \uB3C5\uC11C \uCE74\uB4DC JSON \uC8FC\uC18C",
-          dialogMessage: "cards \uBC30\uC5F4 \uB610\uB294 \uAE30\uC874 \uC694\uC77C\uBCC4 cards \uAC1D\uCCB4\uB97C \uC9C0\uC6D0\uD569\uB2C8\uB2E4. Google Drive \uACF5\uAC1C \uACF5\uC720 \uB9C1\uD06C\uB098 \uC9C1\uC811 JSON \uC8FC\uC18C\uB97C \uB123\uC73C\uC138\uC694."
+          dialogTitle: "커스텀 독서 카드 JSON 주소",
+          dialogMessage: "cards 배열 또는 기존 요일별 cards 객체를 지원합니다. Google Drive 공개 공유 링크나 직접 JSON 주소를 넣으세요."
         }
       },
       {
         key: "newtoki1_novel_card_rotation_minutes",
         editTextPreference: {
-          title: "\uACF5\uC6A9 \uCE74\uB4DC \uAD50\uCCB4 \uC8FC\uAE30(\uBD84)",
-          summary: "\uBE48\uCE78: \uBC30\uD3EC\uC18C \uC124\uC815 \uB530\uB984 / 0: \uC0C8\uB85C\uACE0\uCE68\uB9C8\uB2E4 / 60: 1\uC2DC\uAC04\uB9C8\uB2E4",
+          title: "공용 카드 교체 주기(분)",
+          summary: "빈칸: 배포소 설정 따름 / 0: 새로고침마다 / 60: 1시간마다",
           value: "",
-          dialogTitle: "\uACF5\uC6A9 \uCE74\uB4DC \uAD50\uCCB4 \uC8FC\uAE30",
-          dialogMessage: "0 \uB610\uB294 \uBD84 \uB2E8\uC704 \uC22B\uC790\uB97C \uC785\uB825\uD558\uC138\uC694. \uBE48\uCE78\uC740 \uBC30\uD3EC\uC18C JSON \uC124\uC815\uC744 \uC0AC\uC6A9\uD569\uB2C8\uB2E4."
+          dialogTitle: "공용 카드 교체 주기",
+          dialogMessage: "0 또는 분 단위 숫자를 입력하세요. 빈칸은 배포소 JSON 설정을 사용합니다."
         }
       },
       {
         key: "newtoki1_novel_external_auth_enabled",
         switchPreferenceCompat: {
-          title: "\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC0AC\uC6A9",
-          summary: "\uCF1C\uBA74 Windows/\uB3C4\uCEE4 \uC678\uBD80\uC778\uC99D \uC11C\uBC84\uB9CC \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uB044\uBA74 \uC774 \uAE30\uAE30\uC758 \uC228\uC740 WebView\uB97C \uC0AC\uC6A9\uD569\uB2C8\uB2E4.",
+          title: "외부인증 서버 사용",
+          summary: "켜면 Windows/도커 외부인증 서버만 사용합니다. 끄면 이 기기의 숨은 WebView를 사용합니다.",
           value: false
         }
       },
       {
         key: "newtoki1_novel_external_auth_endpoint",
         editTextPreference: {
-          title: "\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC8FC\uC18C",
-          summary: "Windows: localhost \uAC00\uB2A5 / \uBAA8\uBC14\uC77C: LAN, \uC5ED\uBC29\uD5A5 \uD504\uB85D\uC2DC \uB610\uB294 VPN \uC8FC\uC18C",
+          title: "외부인증 서버 주소",
+          summary: "Windows: localhost 가능 / 모바일: LAN, 역방향 프록시 또는 VPN 주소",
           value: "",
-          dialogTitle: "\uC608: http://192.168.0.10:9870",
+          dialogTitle: "예: http://192.168.0.10:9870",
           dialogMessage: ""
         }
       },
       {
         key: "newtoki1_novel_external_auth_access_key",
         editTextPreference: {
-          title: "\uC678\uBD80\uC778\uC99D \uC11C\uBC84 \uC811\uC18D \uD0A4 (\uC120\uD0DD)",
-          summary: "\uC11C\uBC84\uC5D0 \uD0A4\uB97C \uC124\uC815\uD55C \uACBD\uC6B0\uB9CC \uC785\uB825",
+          title: "외부인증 서버 접속 키 (선택)",
+          summary: "서버에 키를 설정한 경우만 입력",
           value: "",
-          dialogTitle: "\uC811\uC18D \uD0A4",
+          dialogTitle: "접속 키",
           dialogMessage: ""
         }
       }
