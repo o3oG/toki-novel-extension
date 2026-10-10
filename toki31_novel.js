@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.17",
+  version: "0.2.18",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -374,8 +374,8 @@ class DefaultExtension extends MProvider {
     return this._text(response.body);
   }
 
-  async _verifyCandidate(base, deadline) {
-    const seconds = Math.min(20, Math.floor((deadline - Date.now()) / 1000));
+  async _verifyCandidate(base, deadline, capSeconds) {
+    const seconds = Math.min(capSeconds || 20, Math.floor((deadline - Date.now()) / 1000));
     if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
     const body = await this._rawText(base + "/novel", base + "/novel", seconds);
     this._validateNovelResponse(base + "/novel", body);
@@ -448,7 +448,27 @@ class DefaultExtension extends MProvider {
         const authentication = this._authenticationRequired(error, url);
         if (authentication) throw authentication;
         const afterAuthFailure = resumeAuth && (error?.invalidNovelResponse === true || [403, 404, 410].indexOf(Number(error?.statusCode)) >= 0);
-        if (!this._domainFailure(error).retry && !afterAuthFailure) throw error;
+        const failure = this._domainFailure(error);
+        if (error?.domainUnavailable && failure.candidate) { lastError = error; break; }
+        if (!failure.retry && !afterAuthFailure) {
+          if (!failure.candidate) throw error;
+          // A missing chapter/API is not evidence that the entire origin moved.
+          if (this._text(url).split(/[?#]/)[0] !== original.origin + "/novel"
+              && this._text(url).split(/[?#]/)[0] !== original.origin + "/novel/") {
+            try { await this._verifyCandidate(original.origin, deadline); }
+            catch (probeError) {
+              const auth = this._authenticationRequired(probeError, url);
+              if (auth) throw auth;
+              if (!this._domainFailure(probeError).candidate && !probeError?.redirectBase) throw probeError;
+              if (probeError?.redirectBase) return await this._followDomainRedirect(probeError, url, referer, operation, deadline);
+              lastError = probeError;
+              break;
+            }
+            throw error;
+          }
+          lastError = error;
+          break;
+        }
         lastError = error;
         if (attempt === 0 && remaining() > 1) await this._pause(750);
       }
@@ -1276,8 +1296,8 @@ class DefaultExtension extends MProvider {
     return `<h2>${this.escapeHtml(title || "Chapter")}</h2><hr><br><div>${paragraphs}</div>`;
   }
 
-  async _externalAuthNovel(name, target) {
-    const started = Date.now(), deadline = started + 115000;
+  async _externalAuthNovel(name, target, requestDeadline) {
+    const started = Date.now(), deadline = Math.min(started + 115000, requestDeadline || Infinity);
     let stage = "health", jobId = "", lastState = "", attempt = 0;
     const history = [];
     const record = value => {
@@ -1327,7 +1347,9 @@ class DefaultExtension extends MProvider {
                 retryCode = code;
                 break;
               }
-              throw new Error("서버 작업 실패 | code=" + code);
+              const failed = new Error("서버 작업 실패 | code=" + code);
+              failed.externalAuthCode = code;
+              throw failed;
             }
             if (lastState === "ready") {
               stage = "manifest";
@@ -1362,11 +1384,13 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      throw new Error("외부인증 진단 v0.2.16 | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.18 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
         + "\n재시도하거나 웹뷰에서 인증 상태를 확인하세요.");
+      diagnostic.externalAuthCode = error?.externalAuthCode;
+      throw diagnostic;
     }
   }
 
@@ -1434,7 +1458,50 @@ class DefaultExtension extends MProvider {
   async getHtmlContent(name, url) {
     const base = await this._resolveBaseUrl();
     const target = this.siteUrl(base, url);
-    if (this._externalAuthEnabled()) return await this._externalAuthNovel(name, target);
+    if (this._externalAuthEnabled()) {
+      const deadline = Date.now() + this.domainRequestBudgetMs;
+      const result = await this._withDomainFallback(target, `${base}/novel`, async current => {
+        const origin = this._origin(current);
+        const checked = Number(this._preferenceString("toki_novel_external_checked_time", "0"));
+        if (this._numberedTokiOrigin(current)
+            && (this._preferenceString("toki_novel_external_checked_base", "") !== origin
+              || !checked || Date.now() - checked >= 60000)) {
+          try {
+            await this._verifyCandidate(origin, deadline, 8);
+            this._setPreferenceString("toki_novel_external_checked_base", origin);
+            this._setPreferenceString("toki_novel_external_checked_time", String(Date.now()));
+          } catch (probeError) {
+            // The server and Mangayomi have separate authenticated browser sessions.
+            // An app-side challenge/unknown page must not preempt the server session.
+            if (probeError?.redirectBase) throw probeError;
+            if (!probeError?.authenticationRequired && !probeError?.invalidNovelResponse
+                && this._domainFailure(probeError).candidate) {
+              probeError.domainUnavailable = true;
+              throw probeError;
+            }
+          }
+        }
+        try { return await this._externalAuthNovel(name, current, deadline); }
+        catch (error) {
+          if (error?.externalAuthCode !== "manual_viewer_confirmation_required") throw error;
+          // This server code describes a viewer failure, not a dead domain.
+          // Only a separate site check may trigger migration of the same chapter.
+          try { await this._verifyCandidate(this._origin(current), deadline); }
+          catch (probeError) {
+            const auth = this._authenticationRequired(probeError, current);
+            if (auth) throw auth;
+            if (probeError?.redirectBase) throw probeError;
+            if (!probeError?.invalidNovelResponse && this._domainFailure(probeError).candidate) {
+              probeError.domainUnavailable = true;
+              throw probeError;
+            }
+            throw error;
+          }
+          throw error;
+        }
+      });
+      return result.value;
+    }
     const result = await this._withDomainFallback(target, `${base}/novel`,
       async (current, currentReferer, context) => await this._localWebViewNovel(name, current, this._origin(current),
         Math.min(context.candidate ? 20 : 35, context.remainingSeconds)));
