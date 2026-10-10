@@ -6,14 +6,14 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.22",
+  version: "0.2.23",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
   isNsfw: true,
   hasCloudflare: false,
   appMinVerReq: "0.9.2",
-  notes: "작품명/회차명 표시 · 문단 줄바꿈·한 칸 들여쓰기 · 글자 크기 문구 제거 · 20초 주소 전환 · 웹뷰 경로 수정"
+  notes: "작품명/회차명 표시 · 문단 줄바꿈·한 칸 들여쓰기 · 글자 크기 문구 제거 · 최근 정상 주소 재확인 생략 · 초기 완료 확인 단축 · 20초 주소 전환 · 웹뷰 경로 수정"
 }];
 
 let tokiNovelDomainRequestActive = false;
@@ -438,6 +438,25 @@ class DefaultExtension extends MProvider {
     finally { tokiNovelDomainRequestActive = false; }
   }
 
+  _rememberVerifiedDomain(base) {
+    const record = {base, time:Date.now()};
+    this.verifiedDomain = record;
+    this._setPreferenceString("toki_novel_verified_domain_v23", JSON.stringify(record));
+  }
+
+  _recentVerifiedDomain(base) {
+    try {
+      const record = this.verifiedDomain || JSON.parse(this._preferenceString("toki_novel_verified_domain_v23", "{}"));
+      const age = Date.now() - Number(record.time);
+      return record.base === base && Number.isFinite(age) && age >= 0 && age < this.domainCacheMs;
+    } catch (_) { return false; }
+  }
+
+  _forgetVerifiedDomain() {
+    this.verifiedDomain = null;
+    this._setPreferenceString("toki_novel_verified_domain_v23", "");
+  }
+
   async _observeDomain(base, deadline) {
     const started = Date.now();
     const allotted = Math.min(this.domainObservationMs, Math.max(0, deadline - started));
@@ -447,6 +466,7 @@ class DefaultExtension extends MProvider {
     if (list) { this._checkListBudget(); list.deadline += allotted + 1000; }
     try {
       await this._verifyCandidate(base, started + allotted, allotted / 1000);
+      this._rememberVerifiedDomain(base);
       return;
     } catch (error) {
       if (error?.authenticationRequired || error?.redirectBase || !this._domainFailure(error).candidate) throw error;
@@ -468,6 +488,25 @@ class DefaultExtension extends MProvider {
     const path = this._text(url).slice(requested.origin.length);
     const refererPath = this._numberedTokiOrigin(referer) ? this._text(referer).slice(this._origin(referer).length) : "/novel";
     const deadline = Date.now() + this.domainRequestBudgetMs;
+    // A recent normal list/body response already proves this origin is live.
+    // Try the chapter directly; transport failures restore normal observation.
+    if (options?.reuseVerifiedDomain && !pending && this._recentVerifiedDomain(original.origin)) {
+      try {
+        const target = original.origin + path;
+        const value = await operation(target, original.origin + refererPath, {
+          candidate:false, remainingSeconds:Math.floor((deadline - Date.now()) / 1000),
+          domainVerified:true, authenticationObserved:false
+        });
+        this._rememberVerifiedDomain(original.origin);
+        return {value, url:target};
+      } catch (error) {
+        this._forgetVerifiedDomain();
+        const authentication = this._authenticationRequired(error, original.origin + path);
+        if (authentication) throw authentication;
+        // Authentication-server failures are not target-domain failures.
+        if (error?.externalAuthDiagnostic || !this._domainFailure(error).retry) throw error;
+      }
+    }
     const candidates = [original.origin];
     const visited = [], records = [];
     let redirects = 0;
@@ -509,6 +548,7 @@ class DefaultExtension extends MProvider {
           domainVerified:!authenticated, authenticationObserved:authenticated
         });
         if (authenticated) this._rememberDomain(base, requested.origin);
+        if (options?.reuseVerifiedDomain) this._rememberVerifiedDomain(base);
         return {value, url:target};
       } catch (error) {
         const authentication = this._authenticationRequired(error, target);
@@ -1405,7 +1445,7 @@ class DefaultExtension extends MProvider {
               return this._novelHtml(this._text(manifest.title).trim() || name, text, heading);
             }
             if (!["queued", "authenticating"].includes(lastState)) throw new Error("알 수 없는 서버 작업 상태입니다.");
-            await this._pause(Math.min(750, Math.max(0, deadline - Date.now())));
+            await this._pause(Math.min(Date.now() - started < 5000 ? 250 : 750, Math.max(0, deadline - Date.now())));
           }
           if (!retryCode) throw new Error("전체 인증 요청 대기시간 초과");
         } finally {
@@ -1423,12 +1463,13 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.22 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.23 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
         + "\n재시도하거나 웹뷰에서 인증 상태를 확인하세요.");
       diagnostic.externalAuthCode = error?.externalAuthCode;
+      diagnostic.externalAuthDiagnostic = true;
       throw diagnostic;
     }
   }
@@ -1499,12 +1540,12 @@ class DefaultExtension extends MProvider {
       const deadline = Date.now() + this.domainRequestBudgetMs;
       const result = await this._withDomainFallback(target, `${base}/novel`,
         async current => await this._externalAuthNovel(name, current, deadline, heading),
-        {allowAuthenticatedServer:true});
+        {allowAuthenticatedServer:true, reuseVerifiedDomain:true});
       return result.value;
     }
     const result = await this._withDomainFallback(target, `${base}/novel`,
       async (current, currentReferer, context) => await this._localWebViewNovel(name, current, this._origin(current),
-        Math.min(context.candidate ? 20 : 35, context.remainingSeconds), heading));
+        Math.min(context.candidate ? 20 : 35, context.remainingSeconds), heading), {reuseVerifiedDomain:true});
     return result.value;
   }
 
