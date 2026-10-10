@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.24",
+  version: "0.2.25",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -1147,6 +1147,16 @@ class DefaultExtension extends MProvider {
     return String(date.valueOf());
   }
 
+  _chapterTitle(title) {
+    // Native recognition prioritizes Ep/Ch and season tokens over the
+    // leading site number. A word joiner keeps the title visually intact
+    // while preventing those story-internal labels from overriding it.
+    return this.cleanText(title).replace(
+      /\b(folge|episode|ep|ch|staffel|season|saison|temporada|s)(?=\.?\s*\d)/gi,
+      token => token[0] + "\u2060" + token.slice(1)
+    );
+  }
+
   async getDetail(url) {
     const cardMatch = this._text(url).match(/\/__toki_novel_card__\/([\w-]+)/);
     if (cardMatch) {
@@ -1210,7 +1220,7 @@ class DefaultExtension extends MProvider {
       const episodeId = row.attr("data-episode-id") || chapterUrl.split("/").pop();
       if (episodeId) chapterIds.add(String(episodeId));
       const number = this.cleanText(this.firstText(row, ".ne-num"));
-      const title = this.cleanText(this.firstText(row, ".ne-title"));
+      const title = this._chapterTitle(this.firstText(row, ".ne-title"));
       const rowText = this.cleanText(row.text);
       const rowClass = this._text(row.attr("class"));
       const isNotReady = this.hasElement(row, ".ep-badge-not-ready") || /novel-ep--not-ready/.test(rowClass);
@@ -1258,7 +1268,7 @@ class DefaultExtension extends MProvider {
           if (!episodeId || chapterIds.has(episodeId)) continue;
           chapterIds.add(episodeId);
           const number = this.cleanText(item.episodeLabel || (item.number ? `${item.number}\uD654` : "회차"));
-          const title = this.cleanText(item.title || "");
+          const title = this._chapterTitle(item.title || "");
           const markers = [
             this.isTrueFlag(item.isNotReady) ? "⏳ 준비중" : "",
             this.isTrueFlag(item.isPaid) || this.isPaidGate(item.gateMode) ? "🔒 유료" : ""
@@ -1473,7 +1483,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.24 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.25 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
