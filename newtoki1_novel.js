@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.17",
+  version: "0.2.18",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/newtoki1_novel.js",
@@ -670,7 +670,10 @@ class DefaultExtension extends MProvider {
     base = this._origin(result.url);
     const body = result.value;
     const data = JSON.parse(body);
-    const novels = Array.isArray(data?.novels) ? data.novels : [];
+    if (!Array.isArray(data?.novels)) {
+      throw new Error("토끼 소설 1 구조 진단 v0.2.18 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+    }
+    const novels = data.novels;
     return {
       list: novels.map((item) => this.novelFromApi(base, item)),
       hasNextPage: novels.length >= this.pageSize
@@ -916,7 +919,9 @@ class DefaultExtension extends MProvider {
     const base = await this._resolveBaseUrl();
     const target = `${base}/rank?kind=novel`;
     const result = await this._requestResult(target, `${base}/rank`, 30);
-    return { list: this.listFromRankDocument(new Document(result.value), this._origin(result.url)), hasNextPage: false };
+    const list = this.listFromRankDocument(new Document(result.value), this._origin(result.url));
+    if (!list.length) throw this._siteStructureError("인기 목록", result.url, result.value);
+    return { list, hasNextPage: false };
   }
 
   async _listForRule(page, rule) {
@@ -1039,6 +1044,18 @@ class DefaultExtension extends MProvider {
     if (year < 100) year += 2000;
     const date = new Date(year, Number(match[2]) - 1, Number(match[3]));
     return String(date.valueOf());
+  }
+
+  _siteStructureError(stage, url, html) {
+    const doc = new Document(this._text(html));
+    const safePath = value => this._text(value).split(/[?#]/)[0].slice(0, 100);
+    const short = value => this._text(value).replace(/[^a-zA-Z0-9_ .:-]/g, "").slice(0, 100);
+    const counts = [".novel-detail", ".novel-ep-row", "a.novel-card", ".search-results-grid > a.card", "a.rank-v2-row", "h1", "a"].map(selector => selector + "=" + doc.select(selector).length);
+    const headings = doc.select("h1, h2").slice(0, 6).map(node => short(node.attr("class"))).filter(Boolean);
+    const links = doc.select("a[href]").filter(node => /\/novel(?:\/|$)/.test(this._text(node.getHref || node.attr("href")))).slice(0, 6).map(node => safePath(node.getHref || node.attr("href")) + " class=" + short(node.attr("class")));
+    const containers = doc.select("[class]").map(node => short(node.attr("class"))).filter(value => /novel|episode|chapter|rank|detail|book|list/i.test(value));
+    const unique = Array.from(new Set(containers)).slice(0, 12);
+    return new Error("토끼 소설 1 구조 진단 v0.2.18 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + "\n요소: " + counts.join(", ") + "\n제목요소 class: " + headings.join("; ") + "\n영역 class: " + unique.join("; ") + "\n소설 링크: " + links.join("; ") + "\n기존 파서와 응답 구조가 일치하지 않습니다. 이 오류 화면을 공유해 주세요.");
   }
 
   async getDetail(url) {
@@ -1170,6 +1187,8 @@ class DefaultExtension extends MProvider {
         windows += 1;
       }
     }
+
+    if (!chapters.length) throw this._siteStructureError("작품 상세·목차", target, result.value);
 
     return {
       name,
