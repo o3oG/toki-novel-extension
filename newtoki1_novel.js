@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.20",
+  version: "0.2.21",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/newtoki1_novel.js",
@@ -93,6 +93,7 @@ class DefaultExtension extends MProvider {
     this.domainCacheMs = 10 * 60 * 1000;
     this.pageSize = 49;
     this.requestSequence = 0;
+    this.novelMetadata = new Map();
     this.fallbackCover = this.assetBaseUrl + "/cover/auto-novel-1.png";
   }
 
@@ -383,7 +384,7 @@ class DefaultExtension extends MProvider {
       this._checkListBudget();
       const remaining = Math.floor((Math.min(deadline, this._listContext?.deadline || deadline) - Date.now()) / 1000);
       if (remaining < 1) throw this._listTimeoutError();
-      this._saveReport("transport", "v0.2.20 · Rhttp InvalidContentType → Dart HTTP\n경로: " + this._safeReportUrl(url));
+      this._saveReport("transport", "v0.2.21 · Rhttp InvalidContentType → Dart HTTP\n경로: " + this._safeReportUrl(url));
       response = await this._boundedGet(new Client({
         useDartHttpClient: true, persistentConnection: false,
         timeout: remaining, connectTimeout: Math.min(8, remaining)
@@ -697,7 +698,7 @@ class DefaultExtension extends MProvider {
     catch (error) {
       const detail = this._text(error?.message || error);
       const cause = /InvalidContentType/.test(detail) ? "InvalidContentType" : error?.authenticationRequired ? "AUTH_REQUIRED" : error?.statusCode ? "HTTP " + error.statusCode : error?.listDeadline ? "20초 초과" : "연결 오류";
-      this._saveReport("api", "v0.2.20 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
+      this._saveReport("api", "v0.2.21 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
       throw error;
     }
     base = this._origin(result.url);
@@ -705,15 +706,15 @@ class DefaultExtension extends MProvider {
     let data;
     try { data = JSON.parse(body); }
     catch (_) {
-      this._saveReport("api", "v0.2.20 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
-      throw new Error("토끼 소설 1 v0.2.20 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
+      this._saveReport("api", "v0.2.21 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
+      throw new Error("토끼 소설 1 v0.2.21 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
     }
     if (!Array.isArray(data?.novels)) {
-      this._saveReport("api", "v0.2.20 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
-      throw new Error("토끼 소설 1 구조 진단 v0.2.20 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      this._saveReport("api", "v0.2.21 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      throw new Error("토끼 소설 1 구조 진단 v0.2.21 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
     }
     const novels = data.novels;
-    this._saveReport("api", "v0.2.20 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
+    this._saveReport("api", "v0.2.21 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
     const list = novels.map((item) => this.novelFromApi(base, item));
     this._rememberNovels(list);
     return {
@@ -962,7 +963,7 @@ class DefaultExtension extends MProvider {
     const target = `${base}/rank?kind=novel`;
     const result = await this._requestResult(target, `${base}/rank`, 30);
     const doc = new Document(result.value), origin = this._origin(result.url);
-    this._captureStructure("rank", result.url, result.value);
+    this._captureStructure("rank", result.url, result.value, doc);
     let list = this.listFromRankDocument(doc, origin);
     if (!list.length) list = this._listFromNovelLinks(doc, origin).slice(0, 50);
     if (!list.length) throw this._siteStructureError("인기 목록", result.url, result.value);
@@ -1134,22 +1135,23 @@ class DefaultExtension extends MProvider {
   }
 
   _rememberNovels(list) {
-    let cache = [];
-    try { cache = JSON.parse(this._preferenceString("newtoki1_novel_metadata_v20", "[]")); } catch (_) {}
-    if (!Array.isArray(cache)) cache = [];
-    const valid = list.filter(item => item.name && /^https:\/\/[^/]+\/novel\/\d+$/.test(item.link));
-    const keys = new Set(valid.map(item => item.link));
-    cache = cache.filter(item => item && !keys.has(item.link)).concat(valid.map(item => ({
-      name: item.name, link: item.link,
-      imageUrl: /\/cover\/auto-novel-\d+\.png/.test(item.imageUrl || "") || !item.imageUrl ? (cache.find(previous => previous.link === item.link)?.imageUrl || "") : item.imageUrl
-    }))).slice(-200);
-    this._setPreferenceString("newtoki1_novel_metadata_v20", JSON.stringify(cache));
+    // Write each record once without first reading an absent preference.
+    // The app creates defaults and queues its writes asynchronously.
+    for (const item of list) {
+      if (!item.name || !/^https:\/\/[^/]+\/novel\/\d+$/.test(item.link)) continue;
+      const old = this.novelMetadata.get(item.link) || {};
+      const imageUrl = !item.imageUrl || /\/cover\/auto-novel-\d+\.png/.test(item.imageUrl) ? (old.imageUrl || "") : item.imageUrl;
+      const record = {name: item.name, link: item.link, imageUrl};
+      this.novelMetadata.set(item.link, record);
+      this._setPreferenceString("newtoki1_novel_metadata_v21_" + encodeURIComponent(item.link), JSON.stringify(record));
+    }
+    while (this.novelMetadata.size > 200) this.novelMetadata.delete(this.novelMetadata.keys().next().value);
   }
 
   _rememberedNovel(target) {
     try {
-      const cache = JSON.parse(this._preferenceString("newtoki1_novel_metadata_v20", "[]"));
-      return cache.find(item => item.link === target.split(/[?#]/)[0].replace(/\/$/, "")) || {};
+      const key = target.split(/[?#]/)[0].replace(/\/$/, "");
+      return this.novelMetadata.get(key) || JSON.parse(this._preferenceString("newtoki1_novel_metadata_v21_" + encodeURIComponent(key), "{}"));
     } catch (_) { return {}; }
   }
 
@@ -1160,7 +1162,7 @@ class DefaultExtension extends MProvider {
       if (!/^\/novel\/\d+\/?$/.test(path)) continue;
       const key = path.replace(/\/$/, "");
       const explicitLabel = anchor.attr("title") || this.firstText(anchor, ".nv-title, .subject, h2, h3, h4") || anchor.attr("aria-label");
-      const textLabel = this.cleanText(anchor.text);
+      const textLabel = this._titleWithoutRankMetadata(anchor);
       const label = explicitLabel ? this.cleanText(explicitLabel) : this._cleanNovelLabel(textLabel || anchor.selectFirst("img")?.attr("alt"));
       const quality = explicitLabel ? 3 : textLabel ? 2 : 1;
       if (label.length > 180) continue;
@@ -1174,8 +1176,19 @@ class DefaultExtension extends MProvider {
       }
     }
     const list = Array.from(byPath.values()).filter(item => item.name && item.quality > 1).map(item => ({ name: item.name, link: item.link, imageUrl: item.imageUrl || this.generatedCover(item.link) }));
-    this._rememberNovels(list);
     return list;
+  }
+
+  _titleWithoutRankMetadata(anchor) {
+    let label = this.cleanText(anchor.text);
+    for (const child of Array.from(anchor.children || [])) {
+      if (!/(?:^|\s)(?:pull-right|rank-icon)(?:\s|$)/.test(this._text(child.attr("class")))) continue;
+      const value = this.cleanText(child.text);
+      if (!value) continue;
+      if (label.startsWith(value)) label = label.slice(value.length).trim();
+      else if (label.endsWith(value)) label = label.slice(0, -value.length).trim();
+    }
+    return label;
   }
 
   _episodeNumber(label, element) {
@@ -1229,8 +1242,8 @@ class DefaultExtension extends MProvider {
     this._setPreferenceString("newtoki1_novel_report_" + stage, this._text(text).slice(0, 12000));
   }
 
-  _captureStructure(stage, url, html) {
-    const doc = new Document(this._text(html));
+  _captureStructure(stage, url, html, parsedDoc) {
+    const doc = parsedDoc || new Document(this._text(html));
     const brief = (node, depth) => {
       const attrs = ["class", "title", "alt", "data-ep", "data-episode-number", "data-chapter-number", "data-episode-id"];
       const parts = attrs.map(key => { const value = this._text(node?.attr(key)).replace(/\s+/g, " ").slice(0, 100); return value ? key + "=" + value : ""; }).filter(Boolean);
@@ -1239,10 +1252,21 @@ class DefaultExtension extends MProvider {
         if (value) parts.push(key + "=" + this._safeReportUrl(value));
       }
       const children = depth > 0 ? Array.from(node?.children || []).filter(child => !/^(script|style|input|textarea|iframe)$/i.test(this._text(child.localName))).slice(0, 6).map(child => brief(child, depth - 1)) : [];
-      return "{" + this._text(node?.localName || "element") + " " + parts.join(" ") + (children.length ? " children=" + children.join(" ") : "") + "}";
+      const textAllowed = /^(?:a|span|h1|h2|h3|h4|strong|small|time|td)$/i.test(this._text(node?.localName)) || /(?:subject|title|num|rank|caption)/i.test(this._text(node?.attr("class")));
+      const label = textAllowed ? this.cleanText(node?.text).slice(0, 100) : "";
+      return "{" + this._text(node?.localName || "element") + " " + parts.join(" ") + (label ? " text=" + label : "") + (children.length ? " children=" + children.join(" ") : "") + "}";
     };
     const anchors = doc.select("a[href]").filter(node => /\/novel\/\d+/.test(this._text(node.getHref || node.attr("href")))).slice(0, 12);
-    const report = this._siteStructureError(stage, url, html).message + "\n링크 구조:\n" + anchors.map(node => brief(node, 3)).join("\n");
+    const parent = node => {
+      try { return " parentClass=" + this._text(node.xpathFirst("../@class")).slice(0, 100) + " siblingClasses=" + (node.xpath("../*/@class") || []).slice(0, 10).join(","); }
+      catch (_) { return ""; }
+    };
+    const headings = doc.select("h1, h2, h3, h4").slice(0, 8).map(node => brief(node, 1));
+    const articles = doc.select("article").slice(0, 1).map(node => brief(node, 2));
+    const classes = [].concat(doc.select("div"), doc.select("span"), doc.select("section")).map(node => this._text(node.attr("class")))
+      .filter(value => /content|view|read|novel|episode|chapter|subject|item-num|text/i.test(value));
+    const report = this._siteStructureError(stage, url, html, doc).message + "\n제목 구조:\n" + headings.join("\n") + "\n링크 구조:\n" + anchors.map(node => brief(node, 3) + parent(node)).join("\n")
+      + "\n내용 영역 class: " + Array.from(new Set(classes)).slice(0, 30).join("; ") + "\narticle 구조:\n" + articles.join("\n");
     const forms = doc.select("form").slice(0, 3).map(form => "action=" + this._safeReportUrl(form.attr("action")) + " method=" + this._text(form.attr("method")).slice(0, 10)
       + " fields=" + form.select("input[name], select[name]").map(field => this._text(field.attr("name")).replace(/[^a-zA-Z0-9_\[\]-]/g, "").slice(0, 40)).slice(0, 12).join(","));
     this._saveReport(stage, report + (forms.length ? "\n검색 폼 구조:\n" + forms.join("\n") : ""));
@@ -1255,7 +1279,8 @@ class DefaultExtension extends MProvider {
   async _diagnosticDetail(url) {
     // This explicit diagnostic action reads only DOM structure, never returns
     // a chapter's text or sends it to a third party.
-    const lastUrl = this._preferenceString("newtoki1_novel_last_body_url", "");
+    const bodyReport = this._preferenceString("newtoki1_novel_report_body", "");
+    const lastUrl = this._preferenceString("newtoki1_novel_last_body_url", "") || (bodyReport.match(/\n경로:\s*(https:\/\/[^\s]+)/) || [])[1] || "";
     const base = await this._resolveBaseUrl();
     if (this._origin(lastUrl) === base && /^\/novel\/\d+\/\d+$/.test(this._novelLinkPath(base, lastUrl))) {
       try {
@@ -1263,12 +1288,12 @@ class DefaultExtension extends MProvider {
         this._captureStructure("bodyStructure", result.url, result.value);
       } catch (_) { this._saveReport("bodyStructure", "실패 회차의 HTTP 구조를 읽지 못했습니다. WebView 인증 상태와 서버의 본문 추출 구조를 확인해야 합니다."); }
     }
-    const text = ["transport", "api", "rank", "detail", "body", "bodyStructure"].map(stage => this._preferenceString("newtoki1_novel_report_" + stage, "")).filter(Boolean).join("\n\n");
-    return { name: "토끼 소설 1 진단 v0.2.20", link: url, imageUrl: this.generatedCover("diagnostics"), description: text || "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
+    const text = ["body", "bodyStructure", "api", "transport", "detail", "rank"].map(stage => this._preferenceString("newtoki1_novel_report_" + stage, "")).filter(Boolean).join("\n\n");
+    return { name: "토끼 소설 1 진단 v0.2.21", link: url, imageUrl: this.generatedCover("diagnostics"), description: text || "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
   }
 
-  _siteStructureError(stage, url, html) {
-    const doc = new Document(this._text(html));
+  _siteStructureError(stage, url, html, parsedDoc) {
+    const doc = parsedDoc || new Document(this._text(html));
     const safePath = value => this._text(value).split(/[?#]/)[0].slice(0, 100);
     const short = value => this._text(value).replace(/[^a-zA-Z0-9_ .:-]/g, "").slice(0, 100);
     const counts = [".novel-detail", ".novel-ep-row", "a.novel-card", ".search-results-grid > a.card", "a.rank-v2-row", ".novel-viewer", "article", "p", "h1", "a"].map(selector => selector + "=" + doc.select(selector).length);
@@ -1276,7 +1301,7 @@ class DefaultExtension extends MProvider {
     const links = doc.select("a[href]").filter(node => /\/novel(?:\/|$)/.test(this._text(node.getHref || node.attr("href")))).slice(0, 6).map(node => safePath(node.getHref || node.attr("href")) + " class=" + short(node.attr("class")));
     const containers = doc.select("[class]").map(node => short(node.attr("class"))).filter(value => /novel|episode|chapter|rank|detail|book|list/i.test(value));
     const unique = Array.from(new Set(containers)).slice(0, 12);
-    return new Error("토끼 소설 1 구조 진단 v0.2.20 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
+    return new Error("토끼 소설 1 구조 진단 v0.2.21 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
   }
 
   async getDetail(url) {
@@ -1322,7 +1347,7 @@ class DefaultExtension extends MProvider {
     target = result.url;
     base = this._origin(target);
     const doc = new Document(result.value);
-    this._captureStructure("detail", target, result.value);
+    this._captureStructure("detail", target, result.value, doc);
     const root = doc.selectFirst(".novel-detail");
     const cached = this._rememberedNovel(target);
     const pageTitle = this.firstText(root, ".nd-info h1") || this.firstText(doc, "main h1, h1") || doc.selectFirst('meta[property="og:title"]')?.attr("content") || "";
@@ -1334,7 +1359,7 @@ class DefaultExtension extends MProvider {
       ? root.select(".hero-v2-tag").map((element) => element.text.trim()).filter(Boolean)
       : [];
     const ogCover = doc.selectFirst('meta[property="og:image"]')?.attr("content");
-    const imageUrl = cached.imageUrl || this._imageFromNode(root?.selectFirst(".nd-thumb img"), base) || (ogCover ? this.absoluteUrl(base, ogCover) : this.generatedCover(target));
+    const imageUrl = cached.imageUrl || this._imageFromNode(root?.selectFirst(".nd-thumb img"), base) || (ogCover && !commonTitle ? this.absoluteUrl(base, ogCover) : this.generatedCover(target));
     const status = this.hasElement(root, ".nv-badge--done") ? 1 : 0;
     const chapters = [];
     const chapterIds = new Set();
@@ -1606,7 +1631,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      throw new Error("외부인증 진단 v0.2.20 | stage=" + stage
+      throw new Error("외부인증 진단 v0.2.21 | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
@@ -1694,7 +1719,7 @@ class DefaultExtension extends MProvider {
             Math.min(context.candidate ? 20 : 35, context.remainingSeconds)));
         html = result.value;
       }
-      this._saveReport("body", "v0.2.20 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
+      this._saveReport("body", "v0.2.21 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
       this._setPreferenceString("newtoki1_novel_last_body_url", "");
       return html;
     } catch (error) {
@@ -1702,7 +1727,7 @@ class DefaultExtension extends MProvider {
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
       detail = detail.replace(/https?:\/\/[^\s|]+/g, value => this._safeReportUrl(value));
-      this._saveReport("body", "v0.2.20 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
+      this._saveReport("body", "v0.2.21 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
       this._setPreferenceString("newtoki1_novel_last_body_url", target.split(/[?#]/)[0]);
       throw new Error("회차: " + this.cleanText(name) + " | 경로=" + this._safeReportUrl(target) + "\n" + detail + "\n인기 목록의 [진단] 항목 또는 ::진단 검색에서 전체 기록을 확인하세요.");
     }

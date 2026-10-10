@@ -11,8 +11,8 @@ class Document{
  constructor(html){this.html=html} select(s){if(s==='a[href]'||s==='a')return fixture.links;if(s==='[class]')return fixture.links.filter(e=>e.attr('class'));return []}
  selectFirst(s){return s==='main h1, h1'?new Element({},fixture.title):null}
 }
-const prefs=new Map();
-class SharedPreferences{get(k){return prefs.get(k)}getString(k,d){return prefs.get(k)??d}setString(k,v){prefs.set(k,v)}}
+const prefs=new Map();let preferenceReads=0;
+class SharedPreferences{get(k){return prefs.get(k)}getString(k,d){preferenceReads++;return prefs.get(k)??d}setString(k,v){prefs.set(k,v)}}
 let plan=[],calls=[],now=Date.now(),script='';
 class FakeDate extends Date{static now(){return now}}
 class Client{constructor(options){this.options=options}async get(url,headers){calls.push({options:this.options,url,headers});const step=plan.shift();if(!step)throw Error('Unexpected HTTP');now+=step.elapsed||0;if(step.error)throw Error(step.error);return step.response}}
@@ -27,8 +27,14 @@ let count=0;const check=(name,f)=>{f();count++};
  check('foreign links',()=>{assert.equal(e._novelLinkPath(base,'https://evil.test/novel/12'),'');assert.equal(e._novelLinkPath(base,'data:text/html,x'),'')});
  check('polluted titles',()=>{for(const [a,b] of [['+36 방금전 1 미카엘 : 악을 심판하는 천사','미카엘 : 악을 심판하는 천사'],['+1178 6시간전 3 야생에서','야생에서'],['+11100.6만 창작물 속으로','창작물 속으로'],['+4638.3만 천하제일인의 소꿉친구','천하제일인의 소꿉친구']])assert.equal(e._cleanNovelLabel(a),b)});
  check('numeric title preservation',()=>{for(const s of ['1998.04.13 인생 최악의 날','1레벨 플레이어','1984','5시간 후의 세계','+5강해짐'])assert.equal(e._cleanNovelLabel(s),s);assert.equal(e._cleanNovelLabel('+10 방금전 1984 세계'),'1984 세계')});
+ check('observed rank child metadata',()=>{
+  const a=link('/novel/17709','+36 방금전 1 1984 세계',{class:'ellipsis'});
+  a.children=[new Element({class:'pull-right gray font-12'},'+36 방금전'),new Element({class:'rank-icon en bg-violet'},'1')];
+  assert.equal(e._titleWithoutRankMetadata(a),'1984 세계');
+  fixture.links=[a];assert.equal(e._listFromNovelLinks(new Document(''),base)[0].name,'1984 세계');
+ });
  fixture.links=[link('/novel/12','',{}, {img:new Element({'data-src':'//img.test/a.webp',alt:'표지'})}),link('/novel/12','+36 방금전 1 미카엘')];
- check('split cover merge',()=>{const a=e._listFromNovelLinks(new Document(''),base);assert.equal(a.length,1);assert.equal(a[0].name,'미카엘');assert.equal(a[0].imageUrl,'https://img.test/a.webp')});
+ check('split cover merge',()=>{const a=e._listFromNovelLinks(new Document(''),base);assert.equal(a.length,1);assert.equal(a[0].name,'미카엘');assert.equal(a[0].imageUrl,'https://img.test/a.webp');e._rememberNovels(a)});
  check('cover candidates',()=>{assert.equal(e._imageFromNode(new Element({'data-src':'data:image/gif;base64,AAA',src:'/cover.jpg'}),base),base+'/cover.jpg');assert.equal(e._imageFromNode(new Element({srcset:'//img.test/b.webp 400w, //img.test/c.webp 800w'}),base),'https://img.test/b.webp')});
  check('episode numbering',()=>{assert.equal(e._chapterName('1998.04.13 인생 최악의 날',e._episodeNumber('1998.04.13 인생 최악의 날',new Element({'data-ep':'6'}))),'Episode 6 · 1998.04.13 인생 최악의 날');assert.equal(e._episodeNumber('짜고치는 고스톱 5'),'5');assert.equal(e._episodeNumber('1998.04.13 인생 최악의 날'),'');assert.equal(e._episodeNumber('1부 끝'),'')});
  check('unknown year false positives',()=>{const s=e._chapterName('1998.04.13 인생 최악의 날','');assert(s.startsWith('[회차 번호 확인 필요]'));assert(!/[0-9]/.test(s))});
@@ -61,7 +67,10 @@ let count=0;const check=(name,f)=>{f();count++};
  await assert.rejects(e._boundedGet({get:()=>new Promise(()=>{})},base,{},0.01),/대기시간 초과/);count++;
  e._rememberNovels([{name:'미카엘',link:base+'/novel/12',imageUrl:e.generatedCover('12')}]);
  check('preserve cover across API cache refresh',()=>assert.equal(e._rememberedNovel(base+'/novel/12').imageUrl,'https://img.test/a.webp'));
+ const beforeReads=preferenceReads;e._rememberNovels([{name:'독립 작품',link:base+'/novel/99',imageUrl:'https://img.test/99.webp'}]);
+ check('metadata write without racing default read',()=>assert.equal(preferenceReads,beforeReads));
+ check('metadata across provider instances',()=>{const next=new c.Ext();assert.equal(next._rememberedNovel(base+'/novel/99').name,'독립 작품');assert.equal(next._rememberedNovel(base+'/novel/99').imageUrl,'https://img.test/99.webp')});
  const idx=JSON.parse(fs.readFileSync(__dirname+'/index.min.json'));
- check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.20');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
+ check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.21');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
  console.log('PASS: '+count+' source 1 checks — polluted titles, merged covers, numbering/year handling, transport fallback/deadline, gates, scoped reader, visible diagnostics, redaction, source isolation');
 })().catch(e=>{console.error(e);process.exitCode=1});
