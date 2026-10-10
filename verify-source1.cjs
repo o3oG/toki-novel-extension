@@ -174,7 +174,7 @@ let count=0;const check=(name,f)=>{f();count++};
  check('cover enrichment never extends list deadline',()=>assert.equal(coverCalls,1));e._listContext=null;
  check('cover diagnostic identifies each missing title',()=>assert(e._report('covers').includes('남은 표지 · '+base+'/novel/778')));
  const idx=JSON.parse(fs.readFileSync(__dirname+'/index.min.json'));
- check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.25');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
+ check('source identity/isolation',()=>{assert.equal(idx[1].sourceCode,code);assert.equal(idx[1].version,'0.2.26');assert.equal(idx[1].id,780920261010903);assert.equal(idx[0].version,'0.2.17')});
  check('Mangayomi WebView joins without duplicate novel path',()=>{assert.equal(idx[1].baseUrl,'https://newtoki1.org');for(const path of ['/novel/17709','/novel/29689','/novel/29689/4062173'])assert.equal(idx[1].baseUrl+path,base+path);assert(code.includes('baseUrl: "https://newtoki1.org"'))});
  console.log('PASS: '+count+' source 1 checks — polluted titles, merged covers, numbering/year handling, transport fallback/deadline, gates, scoped reader, visible diagnostics, redaction, source isolation');
 })().catch(e=>{console.error(e);process.exitCode=1});
