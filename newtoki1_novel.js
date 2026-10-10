@@ -6,7 +6,7 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.18",
+  version: "0.2.19",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/newtoki1_novel.js",
@@ -671,7 +671,7 @@ class DefaultExtension extends MProvider {
     const body = result.value;
     const data = JSON.parse(body);
     if (!Array.isArray(data?.novels)) {
-      throw new Error("토끼 소설 1 구조 진단 v0.2.18 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      throw new Error("토끼 소설 1 구조 진단 v0.2.19 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
     }
     const novels = data.novels;
     return {
@@ -919,7 +919,9 @@ class DefaultExtension extends MProvider {
     const base = await this._resolveBaseUrl();
     const target = `${base}/rank?kind=novel`;
     const result = await this._requestResult(target, `${base}/rank`, 30);
-    const list = this.listFromRankDocument(new Document(result.value), this._origin(result.url));
+    const doc = new Document(result.value), origin = this._origin(result.url);
+    let list = this.listFromRankDocument(doc, origin);
+    if (!list.length) list = this._listFromNovelLinks(doc, origin).slice(0, 50);
     if (!list.length) throw this._siteStructureError("인기 목록", result.url, result.value);
     return { list, hasNextPage: false };
   }
@@ -1046,6 +1048,46 @@ class DefaultExtension extends MProvider {
     return String(date.valueOf());
   }
 
+  _novelLinkPath(base, raw) {
+    const href = this._text(raw).trim();
+    if (!href || /^(?:javascript:|data:|mailto:|#)/i.test(href)) return "";
+    const absolute = this.absoluteUrl(base, href);
+    if (this._origin(absolute).toLowerCase() !== this._origin(base).toLowerCase()) return "";
+    return absolute.slice(this._origin(absolute).length).split(/[?#]/)[0];
+  }
+
+  _listFromNovelLinks(doc, base) {
+    const byPath = new Map();
+    for (const anchor of doc.select("a[href]")) {
+      const path = this._novelLinkPath(base, anchor.getHref || anchor.attr("href"));
+      if (!/^\/novel\/\d+\/?$/.test(path)) continue;
+      const key = path.replace(/\/$/, "");
+      const label = this.cleanText(anchor.attr("title") || this.firstText(anchor, ".nv-title, .subject, h2, h3, h4") || anchor.attr("aria-label") || anchor.selectFirst("img")?.attr("alt") || anchor.text);
+      if (!label || label.length > 180) continue;
+      const img = anchor.selectFirst("img");
+      const rawCover = img?.attr("data-src") || img?.getSrc || img?.attr("src");
+      const imageUrl = rawCover ? this.absoluteUrl(base, rawCover) : this.generatedCover(key);
+      const previous = byPath.get(key);
+      if (!previous || previous.name.length > label.length) byPath.set(key, { name: label, link: base + key, imageUrl });
+    }
+    return Array.from(byPath.values());
+  }
+
+  _chaptersFromNovelLinks(doc, base, novelId) {
+    const chapters = [], seen = new Set();
+    if (!/^\d+$/.test(novelId)) return chapters;
+    for (const anchor of doc.select("a[href]")) {
+      const path = this._novelLinkPath(base, anchor.getHref || anchor.attr("href"));
+      const match = path.match(/^\/novel\/(\d+)\/(\d+)\/?$/);
+      if (!match || match[1] !== novelId || seen.has(match[2])) continue;
+      const label = this.cleanText(anchor.attr("title") || anchor.text);
+      if (!label) continue;
+      seen.add(match[2]);
+      chapters.push({ name: label, url: base + path, dateUpload: null, scanlator: null });
+    }
+    return chapters;
+  }
+
   _siteStructureError(stage, url, html) {
     const doc = new Document(this._text(html));
     const safePath = value => this._text(value).split(/[?#]/)[0].slice(0, 100);
@@ -1055,7 +1097,7 @@ class DefaultExtension extends MProvider {
     const links = doc.select("a[href]").filter(node => /\/novel(?:\/|$)/.test(this._text(node.getHref || node.attr("href")))).slice(0, 6).map(node => safePath(node.getHref || node.attr("href")) + " class=" + short(node.attr("class")));
     const containers = doc.select("[class]").map(node => short(node.attr("class"))).filter(value => /novel|episode|chapter|rank|detail|book|list/i.test(value));
     const unique = Array.from(new Set(containers)).slice(0, 12);
-    return new Error("토끼 소설 1 구조 진단 v0.2.18 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + "\n요소: " + counts.join(", ") + "\n제목요소 class: " + headings.join("; ") + "\n영역 class: " + unique.join("; ") + "\n소설 링크: " + links.join("; ") + "\n기존 파서와 응답 구조가 일치하지 않습니다. 이 오류 화면을 공유해 주세요.");
+    return new Error("토끼 소설 1 구조 진단 v0.2.19 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
   }
 
   async getDetail(url) {
@@ -1101,13 +1143,14 @@ class DefaultExtension extends MProvider {
     base = this._origin(target);
     const doc = new Document(result.value);
     const root = doc.selectFirst(".novel-detail");
-    const name = this.firstText(root, ".nd-info h1");
-    const description = this.firstText(root, ".nd-desc");
+    const name = this.firstText(root, ".nd-info h1") || this.firstText(doc, "main h1, h1") || doc.selectFirst('meta[property="og:title"]')?.attr("content") || "";
+    let description = this.firstText(root, ".nd-desc") || doc.selectFirst('meta[name="description"]')?.attr("content") || "";
     const author = this.firstText(root, ".nd-meta span a");
     const genre = root
       ? root.select(".hero-v2-tag").map((element) => element.text.trim()).filter(Boolean)
       : [];
-    const imageUrl = this.firstImage(root, ".nd-thumb img", name);
+    const ogCover = doc.selectFirst('meta[property="og:image"]')?.attr("content");
+    const imageUrl = ogCover ? this.absoluteUrl(base, ogCover) : this.firstImage(root, ".nd-thumb img", name);
     const status = this.hasElement(root, ".nv-badge--done") ? 1 : 0;
     const chapters = [];
     const chapterIds = new Set();
@@ -1134,6 +1177,10 @@ class DefaultExtension extends MProvider {
         dateUpload: this.parseDate(this.firstText(row, ".ne-date")),
         scanlator: null
       });
+    }
+
+    if (!chapters.length) {
+      for (const chapter of this._chaptersFromNovelLinks(doc, base, novelId)) chapters.push(chapter);
     }
 
     // The new site server-renders only the newest 100 episodes. Older
@@ -1188,7 +1235,11 @@ class DefaultExtension extends MProvider {
       }
     }
 
-    if (!chapters.length) throw this._siteStructureError("작품 상세·목차", target, result.value);
+    if (!chapters.length) {
+      // The native detail page clips error toasts. Put diagnostics in its
+      // expandable description so the user can read the complete report.
+      description = "[목차 추출 실패 — 아래 진단 정보를 공유해 주세요]\n" + this._siteStructureError("작품 상세·목차", target, result.value).message + (description ? "\n\n" + description : "");
+    }
 
     return {
       name,
