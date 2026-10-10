@@ -6,14 +6,14 @@ const mangayomiSources = [{
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.22",
+  version: "0.2.23",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/newtoki1_novel.js",
   isNsfw: true,
   hasCloudflare: false,
   appMinVerReq: "0.9.2",
-  notes: "newtoki1.org 전용 · 목록 20초 · 목차 페이지 수집 · 전체 목차 순번 · 웹뷰 주소 수정 · [진단]에서 누락 페이지 확인"
+  notes: "newtoki1.org 전용 · 목록 20초 · 전체 목차 이동 · 실제 회차 번호 우선 · 제목·표지 보완 · 본문 구조 진단"
 }];
 
 let tokiNovelDomainRequestActive = false;
@@ -385,7 +385,7 @@ class DefaultExtension extends MProvider {
       this._checkListBudget();
       const remaining = Math.floor((Math.min(deadline, this._listContext?.deadline || deadline) - Date.now()) / 1000);
       if (remaining < 1) throw this._listTimeoutError();
-      this._saveReport("transport", "v0.2.22 · Rhttp InvalidContentType → Dart HTTP\n경로: " + this._safeReportUrl(url));
+      this._saveReport("transport", "v0.2.23 · Rhttp InvalidContentType → Dart HTTP\n경로: " + this._safeReportUrl(url));
       response = await this._boundedGet(new Client({
         useDartHttpClient: true, persistentConnection: false,
         timeout: remaining, connectTimeout: Math.min(8, remaining)
@@ -657,7 +657,7 @@ class DefaultExtension extends MProvider {
         const rawLink = element.getHref || element.attr("href");
         const link = this.siteUrl(base, rawLink);
         if (!/\/novel\/\d+/.test(link) || seen.has(link)) continue;
-        const name = this.cleanText(this.firstText(element, group[1]));
+        const name = this._cleanNovelLabel(this.firstText(element, group[1]));
         if (!name) continue;
         seen.add(link);
         list.push({
@@ -672,7 +672,7 @@ class DefaultExtension extends MProvider {
 
   novelFromApi(base, item) {
     const id = this._text(item?.id);
-    const name = this.cleanText(item?.title || ("\uC18C\uC124 " + id));
+    const name = this._cleanNovelLabel(item?.title || ("\uC18C\uC124 " + id));
     return {
       name,
       link: `${this._trimSlash(base)}/novel/${encodeURIComponent(id)}`,
@@ -699,7 +699,7 @@ class DefaultExtension extends MProvider {
     catch (error) {
       const detail = this._text(error?.message || error);
       const cause = /InvalidContentType/.test(detail) ? "InvalidContentType" : error?.authenticationRequired ? "AUTH_REQUIRED" : error?.statusCode ? "HTTP " + error.statusCode : error?.listDeadline ? "20초 초과" : "연결 오류";
-      this._saveReport("api", "v0.2.22 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
+      this._saveReport("api", "v0.2.23 · 목록/검색 API 요청 실패\n경로: /api/novel-list\n원인: " + cause);
       throw error;
     }
     base = this._origin(result.url);
@@ -707,16 +707,17 @@ class DefaultExtension extends MProvider {
     let data;
     try { data = JSON.parse(body); }
     catch (_) {
-      this._saveReport("api", "v0.2.22 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
-      throw new Error("토끼 소설 1 v0.2.22 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
+      this._saveReport("api", "v0.2.23 · /api/novel-list JSON 파싱 실패 · 응답길이=" + this._text(body).length);
+      throw new Error("토끼 소설 1 v0.2.23 · 목록 API가 JSON을 반환하지 않았습니다. 웹뷰에서 인증·사이트 상태를 확인하세요.");
     }
     if (!Array.isArray(data?.novels)) {
-      this._saveReport("api", "v0.2.22 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
-      throw new Error("토끼 소설 1 구조 진단 v0.2.22 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      this._saveReport("api", "v0.2.23 · /api/novel-list novels 배열 없음 · 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
+      throw new Error("토끼 소설 1 구조 진단 v0.2.23 | 단계=목록 API | 경로=/api/novel-list | novels 배열 없음 | 응답 키=" + Object.keys(data || {}).slice(0, 15).join(","));
     }
     const novels = data.novels;
-    this._saveReport("api", "v0.2.22 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
+    this._saveReport("api", "v0.2.23 · 목록/검색 API 정상 · 반환 작품 수=" + novels.length);
     const list = novels.map((item) => this.novelFromApi(base, item));
+    await this._hydrateCovers(list, base);
     this._rememberNovels(list);
     return {
       list,
@@ -968,6 +969,7 @@ class DefaultExtension extends MProvider {
     let list = this.listFromRankDocument(doc, origin);
     if (!list.length) list = this._listFromNovelLinks(doc, origin).slice(0, 50);
     if (!list.length) throw this._siteStructureError("인기 목록", result.url, result.value);
+    await this._hydrateCovers(list, origin);
     this._rememberNovels(list);
     return { list, hasNextPage: false };
   }
@@ -1135,6 +1137,48 @@ class DefaultExtension extends MProvider {
     return "";
   }
 
+  _realCover(url) {
+    return /^https?:\/\//i.test(this._text(url)) && !/\/cover\/auto-novel-\d+\.png/.test(url);
+  }
+
+  _detailCover(doc, base) {
+    for (const selector of [".nd-thumb img", ".view-title .view-content img", ".view-title img.theme-thumb-img"]) {
+      const cover = this._imageFromNode(doc.selectFirst(selector), base);
+      if (cover) return cover;
+    }
+    // A site's generic og:image is not the book's cover.
+    if (this.firstText(doc, "article h2, .view-title h2") || doc.selectFirst(".novel-detail")) {
+      const raw = doc.selectFirst('meta[property="og:image"]')?.attr("content");
+      const cover = raw ? this.absoluteUrl(base, raw) : "";
+      if (this._realCover(cover)) return cover;
+    }
+    return "";
+  }
+
+  async _hydrateCovers(list, base) {
+    const deadline = Math.min(Date.now() + 12000, this._listContext?.deadline || Infinity);
+    for (const item of list) {
+      item.name = this._cleanNovelLabel(item.name);
+      if (this._realCover(item.imageUrl)) continue;
+      const cached = this._rememberedNovel(item.link);
+      if (this._realCover(cached.imageUrl)) { item.imageUrl = cached.imageUrl; continue; }
+      const seconds = Math.floor((deadline - Date.now() - 250) / 1000);
+      if (seconds < 1) continue;
+      try {
+        const result = await this._requestResult(item.link, base + "/novel", Math.min(3, seconds));
+        if (this._novelLinkPath(base, result.url) !== this._novelLinkPath(base, item.link)) continue;
+        const cover = this._detailCover(new Document(result.value), base);
+        if (cover) item.imageUrl = cover;
+      } catch (error) {
+        if (error?.authenticationRequired || error?.listDeadline) break;
+      }
+    }
+    this._saveReport("covers", "v0.2.23 · 표지 확인 · 실제 표지=" + list.filter(item => this._realCover(item.imageUrl)).length
+      + "/" + list.length + "\n표지 미확인 작품:\n" + list.filter(item => !this._realCover(item.imageUrl))
+        .map(item => item.name + " · " + this._safeReportUrl(item.link)).join("\n"));
+    return list;
+  }
+
   _rememberNovels(list) {
     // Write each record once without first reading an absent preference.
     // The app creates defaults and queues its writes asynchronously.
@@ -1142,6 +1186,7 @@ class DefaultExtension extends MProvider {
       if (!item.name || !/^https:\/\/[^/]+\/novel\/\d+$/.test(item.link)) continue;
       const old = this.novelMetadata.get(item.link) || {};
       const imageUrl = !item.imageUrl || /\/cover\/auto-novel-\d+\.png/.test(item.imageUrl) ? (old.imageUrl || "") : item.imageUrl;
+      item.name = this._cleanNovelLabel(item.name);
       const record = {name: item.name, link: item.link, imageUrl};
       this.novelMetadata.set(item.link, record);
       this._setPreferenceString("newtoki1_novel_metadata_v21_" + encodeURIComponent(item.link), JSON.stringify(record));
@@ -1152,7 +1197,8 @@ class DefaultExtension extends MProvider {
   _rememberedNovel(target) {
     try {
       const key = target.split(/[?#]/)[0].replace(/\/$/, "");
-      return this.novelMetadata.get(key) || JSON.parse(this._preferenceString("newtoki1_novel_metadata_v21_" + encodeURIComponent(key), "{}"));
+      const record = this.novelMetadata.get(key) || JSON.parse(this._preferenceString("newtoki1_novel_metadata_v21_" + encodeURIComponent(key), "{}"));
+      return {...record, name: this._cleanNovelLabel(record.name)};
     } catch (_) { return {}; }
   }
 
@@ -1164,7 +1210,7 @@ class DefaultExtension extends MProvider {
       const key = path.replace(/\/$/, "");
       const explicitLabel = anchor.attr("title") || this.firstText(anchor, ".nv-title, .subject, h2, h3, h4") || anchor.attr("aria-label");
       const textLabel = this._titleWithoutRankMetadata(anchor);
-      const label = explicitLabel ? this.cleanText(explicitLabel) : this._cleanNovelLabel(textLabel || anchor.selectFirst("img")?.attr("alt"));
+      const label = this._cleanNovelLabel(explicitLabel || textLabel || anchor.selectFirst("img")?.attr("alt"));
       const quality = explicitLabel ? 3 : textLabel ? 2 : 1;
       if (label.length > 180) continue;
       const img = anchor.selectFirst("img");
@@ -1192,7 +1238,7 @@ class DefaultExtension extends MProvider {
     return label;
   }
 
-  _episodeNumber(label, element) {
+  _episodeNumber(label, element, allowTrailing = true) {
     const attrs = ["data-ep", "data-episode-number", "data-chapter-number"];
     for (const attr of attrs) {
       const raw = this._text(element?.attr(attr)).trim();
@@ -1207,13 +1253,19 @@ class DefaultExtension extends MProvider {
     const explicit = text.match(/\b(?:episode|ep\.?|ch\.?)\s*(\d+(?:\.\d+)?)(?:\s|$|[·:.-])/i)
       || text.match(/(?:^|\s)(?:제\s*)?(\d+(?:\.\d+)?)\s*(?:화|회)(?:\s|$)/);
     if (explicit) return explicit[1];
+    const leading = text.match(/^(\d+)\.\s+(?!\d)/);
+    if (leading) return leading[1];
     // A separate trailing number is used by the observed episode links.
     const trailing = text.match(/\s+(\d+)$/);
-    return trailing ? trailing[1] : "";
+    return allowTrailing && trailing ? trailing[1] : "";
   }
 
   _chapterName(label, number) {
-    if (number) return "Episode " + number + " · " + label;
+    if (number) {
+      const clean = this.cleanText(label).replace(/^\[목차 순번\]\s*/, "");
+      const remainder = clean.replace(new RegExp("^(?:제\\s*)?" + String(number).replace(/\./g, "\\.") + "(?:\\s*(?:화|회)(?=\\s|$)|\\.\\s+|\\s*[·:]\\s*)\\s*"), "");
+      return number + "화" + (remainder ? " · " + remainder : "");
+    }
     // The native recognizer treats the year in a title as an episode number.
     // Preserve its appearance with full-width digits when the number is unknown.
     return "[회차 번호 확인 필요] " + label.replace(/[0-9]/g, digit => String.fromCharCode(digit.charCodeAt(0) + 0xfee0));
@@ -1236,39 +1288,53 @@ class DefaultExtension extends MProvider {
   }
 
   _episodePager(doc, base, novelId, currentUrl) {
-    // Follow only URLs actually supplied by this book's episode pager.
-    // Never guess a page parameter or follow the comment pager.
-    const path = "/novel/" + novelId;
-    const pages = new Map();
+    const path = "/novel/" + novelId, pages = new Map(), unresolved = [];
     const pagerNodes = doc.select(".theme-episode-pager");
-    for (const pager of pagerNodes) {
-      for (const anchor of pager.select("a[href]")) {
-        const raw = this._text(anchor.getHref || anchor.attr("href")).trim();
-        if (!raw || /^(?:#|javascript:|data:)/i.test(raw)) continue;
-        let url;
-        if (raw.startsWith("?")) url = base + path + raw;
-        else if (raw.startsWith("//")) url = "https:" + raw;
-        else if (/^https?:\/\//i.test(raw) || raw.startsWith("/")) url = this.absoluteUrl(base, raw);
-        else url = base + "/novel/" + raw;
-        url = url.split("#")[0];
-        if (this._origin(url) !== base || this._novelLinkPath(base, url).replace(/\/$/, "") !== path) continue;
-        const query = url.split("?")[1] || "";
-        if (!query) continue;
-        const number = this._pageNumber(url) || Number((this.cleanText(anchor.text).match(/^(\d+)(?:\s*페이지)?$/) || [])[1]);
-        if (!Number.isSafeInteger(number) || number < 1 || number > 150) continue;
-        if (!pages.has(number)) pages.set(number, url);
+    const requested = this._pageNumber(currentUrl) || 1;
+    const currentText = this.cleanText(pagerNodes[0]?.selectFirst(".pg_current")?.text);
+    const current = /^\d+$/.test(currentText) ? Number(currentText) : requested;
+    const anchors = pagerNodes.flatMap(pager => pager.select("a[href]"));
+    const entries = [];
+    let template = null;
+    for (const anchor of anchors) {
+      const raw = this._text(anchor.attr("href") || anchor.getHref).replace(/&amp;/g, "&").trim();
+      if (!raw || /^(?:#|javascript:|data:)/i.test(raw)) continue;
+      let url = raw.startsWith("?") ? base + path + raw : raw.startsWith("//") ? "https:" + raw
+        : /^https?:\/\//i.test(raw) || raw.startsWith("/") ? this.absoluteUrl(base, raw) : base + "/novel/" + raw;
+      url = url.split("#")[0];
+      if (this._origin(url) !== base || this._novelLinkPath(base, url).replace(/\/$/, "") !== path) continue;
+      const label = this.cleanText(anchor.text), cls = this._text(anchor.attr("class"));
+      const numbered = Number((label.match(/^(\d+)(?:\s*페이지)?$/) || [])[1]);
+      const attrPage = Number(anchor.attr("data-page") || anchor.attr("data-ep-page") || 0);
+      let number = this._pageNumber(url) || attrPage || numbered;
+      const query = url.split("?")[1] || "";
+      if (numbered && query) {
+        for (const match of query.matchAll(/(?:^|&)([a-zA-Z][a-zA-Z0-9_]*)=(\d+)(?=&|$)/g)) {
+          if (Number(match[2]) === numbered) {template = {url, key: match[1]}; number = numbered; break;}
+        }
       }
+      entries.push({url, number, query, label, forward: /pg_next/.test(cls) || /다음/.test(label), last: /pg_end|pg_last/.test(cls) || /맨끝|마지막/.test(label)});
     }
-    const current = this._pageNumber(currentUrl) || 1;
-    // A pager with several page labels but no usable links is incomplete.
     const text = pagerNodes.map(node => this._text(node.text)).join(" ");
     const labels = Array.from(text.matchAll(/(\d+)\s*페이지/g)).map(match => Number(match[1]));
-    return { pages, current, expected: Math.max(current, ...Array.from(pages.keys()), ...labels), present: pagerNodes.length > 0 };
+    const groupEnd = Math.max(current, ...labels, ...entries.filter(item => !item.last && !item.forward).map(item => item.number || 0));
+    for (const entry of entries) {
+      let {number, url} = entry;
+      // Use the page parameter observed on numbered links, including controls
+      // whose href omits it. Never execute onclick or assume an API endpoint.
+      if (!number && entry.forward && template) number = groupEnd + 1;
+      if (number && !entry.query && template) {
+        url = template.url.replace(new RegExp("([?&]" + template.key + "=)\\d+(?=&|$)"), "$1" + number);
+      }
+      if (Number.isSafeInteger(number) && number >= 1 && number <= 150 && url.includes("?")) pages.set(number, url);
+      else if (entry.forward || entry.last) unresolved.push(entry.label || "다음/맨끝");
+    }
+    return {pages, current, requested, expected: Math.max(current, ...pages.keys(), ...labels), present: pagerNodes.length > 0, unresolved};
   }
 
   _pageNumber(url) {
     const query = this._text(url).split("?")[1]?.split("#")[0] || "";
-    const match = query.match(/(?:^|&)(?:page|ep_page|episode_page)=(\d+)(?:&|$)/i);
+    const match = query.match(/(?:^|&)(?:page|ep_page|episode_page|epage|p|pg|page_no|pageNo)=(\d+)(?:&|$)/i);
     return match ? Number(match[1]) : 0;
   }
 
@@ -1284,7 +1350,7 @@ class DefaultExtension extends MProvider {
       if (!label) continue;
       seen.add(match[2]);
       // The site's '(2)' in a title is a sub-part, not a whole-book number.
-      chapters.push({label, url: base + path, dateUpload: null, scanlator: null});
+      chapters.push({label, number: this._episodeNumber(label, anchor, false), url: base + path, dateUpload: null, scanlator: null});
     }
     return chapters;
   }
@@ -1296,11 +1362,27 @@ class DefaultExtension extends MProvider {
     const failed = new Map(), visited = new Set([pager.current]);
     let expected = pager.expected, stopped = "수집하지 못함";
     const previousSignature = first.map(ch => ch.url).join("|");
-    const signatures = new Set(previousSignature ? [previousSignature] : []);
-    const record = () => this._saveReport("toc", "v0.2.22 · 목차 페이지 수집\n작품: " + this._safeReportUrl(target)
+    // A bounded metadata checkpoint lets a long TOC continue after refresh.
+    // Reuse only the same book with the same first-page chapter signature.
+    const checkpointKey = "newtoki1_toc_v23_" + encodeURIComponent(base + "/novel/" + novelId);
+    try {
+      const saved = JSON.parse(this._preferenceString(checkpointKey, "{}"));
+      if (pager.current === 1 && saved.signature === previousSignature && Date.now() - saved.at < 300000) {
+        for (const [number, list] of saved.pages || []) {
+          if (!Number.isInteger(number) || number < 1 || number > 150 || !Array.isArray(list)
+              || !list.every(ch => this._novelLinkPath(base, ch.url).startsWith("/novel/" + novelId + "/"))) continue;
+          pages.set(number, list);visited.add(number);
+        }
+        for (const [number, url] of saved.pending || []) if (Number.isInteger(number) && number >= 1 && number <= 150
+          && this._origin(url) === base && this._novelLinkPath(base, url) === "/novel/" + novelId) pending.set(number, url);
+        expected = Math.max(expected, Math.min(150, Number(saved.expected) || 1));
+      }
+    } catch (_) {}
+    const signatures = new Set(Array.from(pages.values()).map(list => list.map(ch => ch.url).join("|")).filter(Boolean));
+    const record = () => this._saveReport("toc", "v0.2.23 · 목차 페이지 수집\n작품: " + this._safeReportUrl(target)
       + "\n완료 페이지: " + Array.from(pages.keys()).sort((a,b) => a-b).join(", ")
       + "\n예상 페이지: " + expected + "\n수집 회차: " + Array.from(pages.values()).reduce((sum, list) => sum + list.length, 0)
-      + "\n실패 페이지:\n" + Array.from(failed.entries()).map(([page, reason]) => page + "페이지 · " + reason).join("\n"));
+      + "\n실패 페이지:\n" + Array.from(failed.entries()).map(([page, reason]) => (page === 0 ? "전체 범위" : page + "페이지") + " · " + reason).join("\n"));
     while (true) {
       const next = Array.from(pending.keys()).filter(page => !visited.has(page)).sort((a,b) => a-b)[0];
       if (!next) break;
@@ -1319,6 +1401,7 @@ class DefaultExtension extends MProvider {
         signatures.add(signature);
         pages.set(next, list);
         const discovered = this._episodePager(pageDoc, base, novelId, result.url);
+        if (discovered.current !== next) { pages.delete(next); throw new Error("요청 페이지와 표시된 페이지가 다름"); }
         expected = Math.max(expected, discovered.expected);
         for (const [page, pageUrl] of discovered.pages) if (!pending.has(page)) pending.set(page, pageUrl);
       } catch (error) {
@@ -1332,12 +1415,26 @@ class DefaultExtension extends MProvider {
     for (const page of Array.from(pages.keys()).sort((a,b) => a-b)) {
       for (const chapter of pages.get(page)) if (!seen.has(chapter.url)) {seen.add(chapter.url); chapters.push(chapter);}
     }
+    const numbers = chapters.map(ch => Number(ch.number || 0)).filter(n => n > 0);
+    const oldest = numbers.length ? Math.min(...numbers) : 0;
+    if (oldest > 1) failed.set(0, "1화까지 수집하지 못함 · 가장 오래된 확인 회차=" + oldest + "화");
+    if (pager.unresolved.length && !numbers.length) failed.set(0, "페이지 이동 확인 필요: " + pager.unresolved.join(", "));
+    if (numbers.length === chapters.length && numbers.every(Number.isInteger)) {
+      const distinct = new Set(numbers), maximum = Math.max(...numbers);
+      const missing = [];
+      for (let n = 1; n <= maximum && missing.length < 20; n++) if (!distinct.has(n)) missing.push(n);
+      if (missing.length) failed.set(0, "미수집 회차: " + missing.join(", ") + "화" + (missing.length === 20 ? " 외 추가 확인 필요" : ""));
+    }
     const complete = failed.size === 0 && first.length > 0;
     record();
-    return { complete, failed, pageCount: pages.size, chapters: chapters.map((chapter, index) => ({
-      name: complete ? this._chapterName("[목차 순번] " + chapter.label, String(chapters.length - index)) : this._chapterName(chapter.label, ""),
-      url: chapter.url, dateUpload: chapter.dateUpload, scanlator: chapter.scanlator
-    })) };
+    if (pager.current === 1) this._setPreferenceString(checkpointKey, JSON.stringify({signature: previousSignature, at: Date.now(), expected,
+      pages: Array.from(pages), pending: Array.from(pending)}));
+    const ordered = chapters.map((chapter, index) => ({
+      name: this._chapterName(chapter.label, chapter.number || (complete ? String(chapters.length - index) : "")),
+      url: chapter.url, dateUpload: chapter.dateUpload, scanlator: chapter.scanlator,
+      order: chapter.number ? Number(chapter.number) : chapters.length - index
+    })).sort((a, b) => a.order - b.order).map(({order, ...chapter}) => chapter);
+    return { complete, failed, pageCount: pages.size, chapters: ordered };
   }
 
   _safeReportUrl(value) {
@@ -1357,7 +1454,7 @@ class DefaultExtension extends MProvider {
   _captureStructure(stage, url, html, parsedDoc) {
     const doc = parsedDoc || new Document(this._text(html));
     const brief = (node, depth) => {
-      const attrs = ["class", "title", "alt", "data-ep", "data-episode-number", "data-chapter-number", "data-episode-id"];
+      const attrs = ["id", "class", "title", "alt", "data-page", "data-ep-page", "data-ep", "data-episode-number", "data-chapter-number", "data-episode-id"];
       const parts = attrs.map(key => { const value = this._text(node?.attr(key)).replace(/\s+/g, " ").slice(0, 100); return value ? key + "=" + value : ""; }).filter(Boolean);
       for (const key of ["href", "src", "data-src", "data-original", "data-srcset", "srcset"]) {
         const value = node?.attr(key);
@@ -1385,7 +1482,11 @@ class DefaultExtension extends MProvider {
     const articles = doc.select("article").slice(0, 1).map(node => brief(node, 2));
     const classes = [].concat(doc.select("div"), doc.select("span"), doc.select("section")).map(node => this._text(node.attr("class")))
       .filter(value => /content|view|read|novel|episode|chapter|subject|item-num|text/i.test(value));
-    const pager = doc.select(".theme-episode-pager").map(node => brief(node, 3));
+    const pager = doc.select(".theme-episode-pager").map(node => brief(node, 1) + "\n" + node.select("a[href]").map(anchor => {
+      const href = this._text(anchor.attr("href") || anchor.getHref);
+      const pageFields = (href.split("?")[1] || "").split("&").map(part => part.replace(/^amp;/, "")).filter(part => /^[a-zA-Z][a-zA-Z0-9_]*=\d{1,3}$/.test(part));
+      return brief(anchor, 0) + (pageFields.length ? " numericQuery=" + pageFields.join("&") : "");
+    }).join("\n"));
     const report = this._siteStructureError(stage, url, html, doc).message + (pager.length ? "\n목차 페이지 이동 구조:\n" + pager.join("\n") : "") + "\n제목 구조:\n" + headings.join("\n") + "\n링크 구조:\n" + anchors.map((node, index) => brief(node, 3) + (index < 3 ? parent(node) : "")).join("\n")
       + "\n내용 영역 class: " + Array.from(new Set(classes)).slice(0, 30).join("; ") + "\narticle 구조:\n" + articles.join("\n");
     const forms = doc.select("form").slice(0, 3).map(form => "action=" + this._safeReportUrl(form.attr("action")) + " method=" + this._text(form.attr("method")).slice(0, 10)
@@ -1409,8 +1510,8 @@ class DefaultExtension extends MProvider {
         this._captureStructure("bodyStructure", result.url, result.value);
       } catch (_) { this._saveReport("bodyStructure", "실패 회차의 HTTP 구조를 읽지 못했습니다. WebView 인증 상태와 서버의 본문 추출 구조를 확인해야 합니다."); }
     }
-    const text = ["body", "bodyStructure", "toc", "api", "transport", "detail", "rank"].map(stage => this._report(stage)).filter(Boolean).join("\n\n");
-    return { name: "토끼 소설 1 진단 v0.2.22", link: url, imageUrl: this.generatedCover("diagnostics"), description: text ? "현재 확장 v0.2.22 · 각 기록의 버전은 오류 당시 실행 버전입니다. 본문 기록을 갱신하려면 해당 회차를 다시 열어 주세요.\n\n" + text : "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
+    const text = ["body", "bodyStructure", "toc", "covers", "api", "transport", "detail", "rank"].map(stage => this._report(stage)).filter(Boolean).join("\n\n");
+    return { name: "토끼 소설 1 진단 v0.2.23", link: url, imageUrl: this.generatedCover("diagnostics"), description: text ? "현재 확장 v0.2.23 · 각 기록의 버전은 오류 당시 실행 버전입니다. 본문 기록을 갱신하려면 해당 회차를 다시 열어 주세요.\n\n" + text : "아직 진단 기록이 없습니다. 목록·상세·본문을 다시 불러온 뒤 이 항목을 다시 열어 주세요.", genre: [], author: "", artist: "", status: 0, chapters: [] };
   }
 
   _siteStructureError(stage, url, html, parsedDoc) {
@@ -1422,7 +1523,7 @@ class DefaultExtension extends MProvider {
     const links = doc.select("a[href]").filter(node => /\/novel(?:\/|$)/.test(this._text(node.getHref || node.attr("href")))).slice(0, 6).map(node => safePath(node.getHref || node.attr("href")) + " class=" + short(node.attr("class")));
     const containers = doc.select("[class]").map(node => short(node.attr("class"))).filter(value => /novel|episode|chapter|rank|detail|book|list/i.test(value));
     const unique = Array.from(new Set(containers)).slice(0, 12);
-    return new Error("토끼 소설 1 구조 진단 v0.2.22 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
+    return new Error("토끼 소설 1 구조 진단 v0.2.23 | 단계=" + stage + " | 경로=" + safePath(url) + " | 응답길이=" + this._text(html).length + " | 소설 링크: " + links.join("; ") + " | 영역 class: " + unique.join("; ") + " | 제목요소 class: " + headings.join("; ") + " | 요소: " + counts.join(", "));
   }
 
   async getDetail(url) {
@@ -1474,14 +1575,15 @@ class DefaultExtension extends MProvider {
     const cached = this._rememberedNovel(target);
     const pageTitle = this.firstText(root, ".nd-info h1") || this.firstText(doc, "article h2, .view-title h2") || this.firstText(doc, "main h1, h1") || doc.selectFirst('meta[property="og:title"]')?.attr("content") || "";
     const commonTitle = /^(?:뉴토끼|토끼|newtoki)(?:\s*[-|·:].*)?$/i.test(this.cleanText(pageTitle));
-    const name = commonTitle ? (cached.name || "[작품명 확인 필요]") : (pageTitle || cached.name || "[작품명 확인 필요]");
+    const name = this._cleanNovelLabel(commonTitle ? (cached.name || "[작품명 확인 필요]") : (pageTitle || cached.name || "[작품명 확인 필요]"));
     let description = this.firstText(root, ".nd-desc") || doc.selectFirst('meta[name="description"]')?.attr("content") || "";
     const author = this.firstText(root, ".nd-meta span a");
     const genre = root
       ? root.select(".hero-v2-tag").map((element) => element.text.trim()).filter(Boolean)
       : [];
     const ogCover = doc.selectFirst('meta[property="og:image"]')?.attr("content");
-    const imageUrl = cached.imageUrl || this._imageFromNode(root?.selectFirst(".nd-thumb img"), base) || (ogCover && !commonTitle ? this.absoluteUrl(base, ogCover) : this.generatedCover(target));
+    const imageUrl = this._detailCover(doc, base) || cached.imageUrl || this.generatedCover(target);
+    this._rememberNovels([{name, link: target.split(/[?#]/)[0], imageUrl}]);
     const status = this.hasElement(root, ".nv-badge--done") ? 1 : 0;
     const chapters = [];
     let serialResult = null;
@@ -1583,9 +1685,9 @@ class DefaultExtension extends MProvider {
       description = "[목차 추출 실패 — 아래 진단 정보를 공유해 주세요]\n" + this._siteStructureError("작품 상세·목차", target, result.value).message + (description ? "\n\n" + description : "");
     }
     if (serialResult) {
-      if (serialResult.complete) description = "[목차 수집 완료] " + serialResult.pageCount + "페이지 · " + chapters.length + "개 항목\n[목차 순번]은 사이트 목록을 역순으로 센 읽기 순서입니다. 사이트의 본편 회차 번호와 다를 수 있으며 외전·후기도 포함합니다.\n\n" + description;
+      if (serialResult.complete) description = "[목차 수집 완료] " + serialResult.pageCount + "페이지 · " + chapters.length + "개 항목\n[목차 순번]은 사이트 회차 번호를 우선 사용합니다. 번호가 없는 항목만 전체 목록의 읽기 순서로 표시하며 외전·후기도 포함합니다.\n\n" + description;
       else description = "[목차 수집 미완료] " + chapters.length + "개 항목만 수집했습니다. 누락된 페이지: " + Array.from(serialResult.failed.keys()).sort((a,b) => a-b).join(", ")
-        + "\n" + Array.from(serialResult.failed.entries()).map(([page, reason]) => page + "페이지 · " + reason).join("\n")
+        + "\n" + Array.from(serialResult.failed.entries()).map(([page, reason]) => (page === 0 ? "전체 범위" : page + "페이지") + " · " + reason).join("\n")
         + "\n미완료 상태에서는 전체 목차 순번을 부여하지 않습니다. 상세 새로고침 후 다시 시도하세요.\n\n" + description;
     }
     const unknown = chapters.filter(chapter => chapter.name.startsWith("[회차 번호 확인 필요]"));
@@ -1730,7 +1832,7 @@ class DefaultExtension extends MProvider {
               }
               const reason = code === "manual_viewer_confirmation_required"
                 ? "서버가 이 회차의 본문 확인을 완료하지 못했습니다. 수동 확인 또는 뷰어 구조 확인이 필요합니다."
-                : "서버 작업 실패";
+                : code === "novel_viewer_structure_unrecognized" ? "인증 후 본문 영역을 확정하지 못했습니다. 구조 진단: " + this._text(state.message).slice(0, 1800) : "서버 작업 실패";
               throw new Error(reason + " | code=" + code);
             }
             if (lastState === "ready") {
@@ -1766,12 +1868,16 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      throw new Error("외부인증 진단 v0.2.22 | stage=" + stage
+      throw new Error("외부인증 진단 v0.2.23 | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
         + "\n재시도하거나 웹뷰에서 인증 상태를 확인하세요.");
     }
+  }
+
+  _novelDomReader() {
+    return "(function (expectedUrl) {\n  const href = String(location.href || '').split(/[?#]/)[0].replace(/\\/$/, '');\n  const wanted = String(expectedUrl || '').split(/[?#]/)[0].replace(/\\/$/, '');\n  const base = {href, allImages: document.images.length, viewport: innerHeight,\n    documentHeight: document.documentElement.scrollHeight};\n  const finish = value => JSON.stringify(Object.assign(base, value));\n  if (href !== wanted) return finish({error:'novel_page_mismatch'});\n  if (document.querySelector('#challenge-form, #cf-challenge-running') ||\n      /just a moment|verify you are human|verifying you are human/i.test(document.title))\n    return finish({text:'', structure:'challenge'});\n  const gate = document.querySelector('[data-novel-unlock-status], .novel-gate, .novel-error, .novel-viewer [role=alert]');\n  if (gate && /로그인|구매|결제|포인트|잠긴|이용할 수 없는|sign in|payment|unlock/i.test(gate.textContent || ''))\n    return finish({error:'manual_login_or_paid_content'});\n  const heading = document.querySelector('h3.theme-novel-title, .ne-h1, .novel-viewer h1');\n  const viewer = document.querySelector('.novel-viewer, [data-novel-content], .theme-novel-content');\n  const title = (heading && heading.textContent || document.title || '').trim();\n  const forbidden = 'script, style, nav, form, footer, header, aside, button, iframe, .comment-media, .view-comment, .serial-list, .theme-episode-pager, .theme-comment-pager, [role=alert]';\n  function visibleText(root) {\n    if (!root) return '';\n    if (root.innerText && !root.querySelector(\"h1, h2, h3, h4, \" + forbidden)) return root.innerText.replace(/\\r\\n?/g, '\\n').trim();\n    const lines = [];\n    function visit(node) {\n      if (node.nodeType === 3) {lines.push(node.textContent || ''); return;}\n      if (node.nodeType !== 1 && node.nodeType !== 11) return;\n      if (node.nodeType === 1 && node.matches(forbidden + \", h1, h2, h3, h4\") || node.hidden) return;\n      if (node.nodeType === 1 && node.tagName === 'BR') {lines.push('\\n'); return;}\n      for (const child of node.childNodes || []) visit(child);\n      if (node.nodeType === 1 && /^(P|DIV|SECTION)$/.test(node.tagName)) lines.push('\\n');\n    }\n    visit(root);return lines.join('').replace(/\\n{3,}/g, '\\n\\n').trim();\n  }\n  function shadowRoot(node) {\n    if (!node) return null;\n    if (node.shadowRoot || node.__novelShadow) return node.shadowRoot || node.__novelShadow;\n    for (const child of Array.from(node.querySelectorAll('*')).slice(0, 100))\n      if (child.shadowRoot || child.__novelShadow) return child.shadowRoot || child.__novelShadow;\n    return node;\n  }\n  const inspected = [], results = [];\n  function inspect(node, trusted) {\n    if (!node || /^(BODY|HTML|MAIN|ARTICLE)$/.test(node.tagName || '') || node.matches(forbidden) ||\n        (!trusted && node.querySelector(forbidden + ', h1, h2, h3, h4, a[href]'))) return;\n    const root = shadowRoot(node), text = visibleText(root);\n    const lines = text.split('\\n').filter(line => line.trim());\n    inspected.push((node.tagName || '') + '#' + (node.id || '').replace(/[^\\w-]/g,'').slice(0,60)\n      + '.' + String(node.className || '').replace(/[^\\w .-]/g,'').slice(0,100)\n      + ':chars=' + text.length + ':lines=' + lines.length + ':shadow=' + (root !== node));\n    const minimum = trusted ? 31 : 300;\n    if (text.length >= minimum && (trusted || lines.length >= 6)) results.push({text, node});\n  }\n  if (viewer) inspect(viewer, true);\n  // Older layouts use a title followed by an unlabelled text/BR container.\n  // Inspect only adjacent containers; never use document.body as novel text.\n  if (!results.length && heading) {\n    let parent = heading;\n    for (let level=0; parent && level<3; level++,parent=parent.parentElement) {\n      if (/^(BODY|HTML|MAIN|ARTICLE)$/.test(parent.tagName || '')) break;\n      let node=parent.nextElementSibling;\n      for (let n=0; node && n<4; n++,node=node.nextElementSibling) {\n        if (/^(NAV|FORM|FOOTER|ASIDE)$/.test(node.tagName || '')) break;\n        inspect(node, false);\n      }\n    }\n  }\n  // Conflicting candidates require manual diagnosis, not a guessed chapter.\n  const distinct = Array.from(new Set(results.map(result => result.text)));\n  if (distinct.length === 1) return finish({text:distinct[0], title, structure:'scoped_reader'});\n  return finish({text:'', title, structure:(distinct.length > 1 ? 'ambiguous:' : 'unrecognized:')\n    + 'heading=' + !!heading + ';viewer=' + !!viewer + ';' + inspected.slice(0,8).join(';')});\n})";
   }
 
   async _localWebViewNovel(name, target, base, timeoutSeconds) {
@@ -1790,7 +1896,7 @@ class DefaultExtension extends MProvider {
         return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
       }
       function makeHtml(text) {
-        var title = document.querySelector(".ne-h1")?.textContent?.trim() || ${JSON.stringify(name || "Chapter")};
+        var title = document.querySelector("h3.theme-novel-title, .ne-h1")?.textContent?.trim() || ${JSON.stringify(name || "Chapter")};
         var paragraphs = String(text || "").replace(/\\r\\n?/g, "\\n").split(/\\n{2,}/).map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) { return escapeHtml(line).replace(/\\n/g, "<br>"); }).join("<br><br>");
         return "<h2>" + escapeHtml(title) + "</h2><hr><br><div>" + paragraphs + "</div>";
       }
@@ -1809,6 +1915,11 @@ class DefaultExtension extends MProvider {
         var root = viewer && (viewer.shadowRoot || viewer.__novelShadow || viewer);
         var text = String(window.__novelTTSText || "").trim();
         if (!text && root) text = Array.from(root.querySelectorAll("p")).map(function (p) { return String(p.textContent || "").trim(); }).filter(Boolean).join("\\n\\n");
+        if (!text && document.querySelector("h3.theme-novel-title")) {
+          var scoped = JSON.parse((${this._novelDomReader()})(${JSON.stringify(target)}));
+          if (scoped.error === "manual_login_or_paid_content") { send("__TOKI31_ERR__MANUAL_GATE"); return; }
+          if (scoped.text) text = scoped.text;
+        }
         if (text.length > 30) { send("__TOKI31_OK__" + makeHtml(text)); return; }
         var heading = String(document.title || "") + " " + String(document.querySelector("h1")?.textContent || "");
         var status = heading.match(/\\b(403|404|410|502|503|504)\\b/);
@@ -1845,6 +1956,15 @@ class DefaultExtension extends MProvider {
   async getHtmlContent(name, url) {
     const base = await this._resolveBaseUrl();
     const target = this.siteUrl(base, url);
+    name = this._cleanNovelLabel(name);
+    try {
+      const book = target.match(/^(https:\/\/[^/]+\/novel\/\d+)\/\d+/)?.[1];
+      if (book) {
+        const checkpoint = JSON.parse(this._preferenceString("newtoki1_toc_v23_" + encodeURIComponent(book), "{}"));
+        const chapter = (checkpoint.pages || []).flatMap(entry => entry[1] || []).find(item => item.url === target);
+        if (chapter) name = this._chapterName(chapter.label, chapter.number);
+      }
+    } catch (_) {}
     try {
       let html;
       if (this._externalAuthEnabled()) html = await this._externalAuthNovel(name, target);
@@ -1854,7 +1974,7 @@ class DefaultExtension extends MProvider {
             Math.min(context.candidate ? 20 : 35, context.remainingSeconds)));
         html = result.value;
       }
-      this._saveReport("body", "v0.2.22 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
+      this._saveReport("body", "v0.2.23 · 본문 전달 성공\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target));
       this._setPreferenceString("newtoki1_novel_last_body_url", "");
       return html;
     } catch (error) {
@@ -1862,7 +1982,7 @@ class DefaultExtension extends MProvider {
       const key = this._text(this._preference("newtoki1_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
       detail = detail.replace(/https?:\/\/[^\s|]+/g, value => this._safeReportUrl(value));
-      this._saveReport("body", "v0.2.22 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
+      this._saveReport("body", "v0.2.23 · 본문 실패\n회차: " + this.cleanText(name) + "\n경로: " + this._safeReportUrl(target) + "\n" + detail);
       this._setPreferenceString("newtoki1_novel_last_body_url", target.split(/[?#]/)[0]);
       throw new Error("회차: " + this.cleanText(name) + " | 경로=" + this._safeReportUrl(target) + "\n" + detail + "\n인기 목록의 [진단] 항목 또는 ::진단 검색에서 전체 기록을 확인하세요.");
     }
