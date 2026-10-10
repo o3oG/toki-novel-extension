@@ -1,12 +1,12 @@
 const mangayomiSources = [{
   name: "\uD1A0\uB07C \uC18C\uC124",
   lang: "ko",
-  baseUrl: "https://toki33.com/novel",
+  baseUrl: "https://toki34.com/novel",
   apiUrl: "",
   iconUrl: "https://dc-toki-mangayomi-novel.pages.dev/icon/ko.toki-novel.png",
   typeSource: "single",
   itemType: 2,
-  version: "0.2.18",
+  version: "0.2.19",
   dateFormat: "",
   dateFormatLocale: "ko_KR",
   pkgPath: "novel/src/ko/toki31_novel.js",
@@ -76,7 +76,7 @@ function dcResolveListCardManifest(data, scope, tab) {
 class DefaultExtension extends MProvider {
   constructor() {
     super();
-    this.fallbackBaseUrl = "https://toki33.com";
+    this.fallbackBaseUrl = "https://toki34.com";
     this.signalUrl = "https://wankyo83.github.io/tokki-traffic-light/domains.json";
     this.assetBaseUrl = "https://dc-toki-mangayomi-novel.pages.dev";
     this.eventManifestUrl = this.assetBaseUrl + "/assets/official-event-card.json";
@@ -221,7 +221,7 @@ class DefaultExtension extends MProvider {
     if (error?.authenticationRequired || /AUTH_REQUIRED|Failed to bypass Cloudflare/i.test(detail)) return { retry: false, candidate: false };
     return {
       retry: [502, 503, 504].indexOf(status) >= 0 || network,
-      candidate: [403, 404, 410, 502, 503, 504].indexOf(status) >= 0 || network || error?.invalidNovelResponse === true
+      candidate: [403, 404, 410, 451, 502, 503, 504].indexOf(status) >= 0 || network || error?.invalidNovelResponse === true || error?.webViewNoResponse === true
     };
   }
 
@@ -324,8 +324,8 @@ class DefaultExtension extends MProvider {
         }
         var heading = String(document.title || "") + " " + String(document.querySelector("h1")?.textContent || "");
         if (!challenge()) {
-          var status = heading.match(/\\b(403|404|410|502|503|504)\\b/);
-          if (status && /gateway|time.?out|unavailable|forbidden|not found|gone/i.test(heading)) { send("__TOKI_READ_ERR__HTTP_" + status[1]); return; }
+          var status = heading.match(/\\b(403|404|410|451|502|503|504)\\b/);
+          if (status && /gateway|time.?out|unavailable|forbidden|not found|gone|legal reasons/i.test(heading)) { send("__TOKI_READ_ERR__HTTP_" + status[1]); return; }
           if (/chrome-error:|chromewebdata/i.test(String(location.href)) || /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_TIMED_OUT/.test(String(document.body?.innerText || ""))) { send("__TOKI_READ_ERR__NETWORK"); return; }
         }
         if (Date.now() - started >= ${Math.max(500, seconds * 1000 - 3000)}) {
@@ -352,7 +352,9 @@ class DefaultExtension extends MProvider {
       throw error;
     }
     // A transport timeout or fetch error is not proof of a changed domain.
-    throw new Error("WebView 응답을 가져오지 못했습니다. 앱 WebView에서 해당 주소를 확인한 뒤 다시 시도하세요. " + detail.slice(0, 150));
+    const error = new Error("WebView 응답을 가져오지 못했습니다. 앱 WebView에서 해당 주소를 확인한 뒤 다시 시도하세요. " + detail.slice(0, 150));
+    error.webViewNoResponse = !detail;
+    throw error;
   }
 
   async _rawText(url, referer, timeout) {
@@ -375,7 +377,7 @@ class DefaultExtension extends MProvider {
   }
 
   async _verifyCandidate(base, deadline, capSeconds) {
-    const seconds = Math.min(capSeconds || 20, Math.floor((deadline - Date.now()) / 1000));
+    const seconds = Math.min(capSeconds || 20, this._listContext ? 3 : Infinity, Math.floor((deadline - Date.now()) / 1000));
     if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
     const body = await this._rawText(base + "/novel", base + "/novel", seconds);
     this._validateNovelResponse(base + "/novel", body);
@@ -424,7 +426,8 @@ class DefaultExtension extends MProvider {
   async _runDomainFallback(url, referer, operation) {
     const requested = this._numberedTokiOrigin(url);
     const pending = this._preferenceString("toki_novel_pending_auth_base", "");
-    const resumeAuth = requested && this._numberedTokiOrigin(pending) && this._isHttpsOrigin(pending);
+    const pendingToki = this._numberedTokiOrigin(pending);
+    const resumeAuth = requested && pendingToki && pendingToki.number >= requested.number && this._isHttpsOrigin(pending);
     if (resumeAuth) {
       url = pending + this._text(url).slice(requested.origin.length);
       if (this._numberedTokiOrigin(referer)) referer = pending + this._text(referer).slice(this._origin(referer).length);
@@ -432,6 +435,8 @@ class DefaultExtension extends MProvider {
     const original = this._numberedTokiOrigin(url);
     const deadline = Math.min(Date.now() + this.domainRequestBudgetMs, this._listContext?.deadline || Infinity);
     const remaining = () => Math.floor((deadline - Date.now()) / 1000);
+    const domainChecks = [];
+    const recordDomain = (base, error) => domainChecks.push(base + " · " + this._text(error?.message || error).split("\n")[0].slice(0, 180));
     let lastError;
     // Non-Toki requests (manifests, signal, external hosts) are never scanned.
     if (!original) return { value: await operation(url, referer, { candidate: false, remainingSeconds: remaining() }), url };
@@ -444,6 +449,7 @@ class DefaultExtension extends MProvider {
         }
         return { value, url };
       } catch (error) {
+        recordDomain(original.origin, error);
         if (error?.redirectBase) return await this._followDomainRedirect(error, url, referer, operation, deadline);
         const authentication = this._authenticationRequired(error, url);
         if (authentication) throw authentication;
@@ -470,12 +476,14 @@ class DefaultExtension extends MProvider {
           break;
         }
         lastError = error;
+        // Lists share a 20-second budget; leave time to validate the next origin.
+        if (this._listContext) break;
         if (attempt === 0 && remaining() > 1) await this._pause(750);
       }
     }
     const fail = () => {
       this._setPreferenceString("toki_novel_scan_after", String(Date.now() + this.domainScanCooldownMs));
-      return new Error("서버 장애 또는 주소 변경을 확인하지 못했습니다. 기존 주소를 유지합니다: " + original.origin + " / " + this._text(lastError && (lastError.message || lastError)));
+      return new Error("주소 확인 v0.2.19 · 서버 장애 또는 주소 변경을 확인하지 못했습니다. 기존 주소를 유지합니다: " + original.origin + " / " + this._text(lastError && (lastError.message || lastError)) + "\n주소별 확인:\n" + domainChecks.join("\n"));
     };
     if (Date.now() < Number(this._preferenceString("toki_novel_scan_after", "0"))) {
       throw new Error("서버 접속 실패. 기존 주소를 유지하며, 도메인 재탐색은 잠시 후 가능합니다. / " + this._text(lastError && lastError.message));
@@ -483,11 +491,11 @@ class DefaultExtension extends MProvider {
     if (resumeAuth) this._setPreferenceString("toki_novel_pending_auth_base", "");
     const candidates = [];
     const previous = this._trimSlash(this._preferenceString("toki_novel_previous_base", ""));
-    if (this._numberedTokiOrigin(previous) && this._isHttpsOrigin(previous) && previous !== original.origin) candidates.push(previous);
     for (let index = 1; index <= this.maxDomainAdvances; index++) {
       const base = "https://toki" + (original.number + index) + ".com";
       if (candidates.indexOf(base) < 0) candidates.push(base);
     }
+    if (this._numberedTokiOrigin(previous) && this._isHttpsOrigin(previous) && previous !== original.origin && candidates.indexOf(previous) < 0) candidates.push(previous);
     for (const base of candidates) {
       if (remaining() < 1) break;
       const target = base + this._text(url).slice(original.origin.length);
@@ -501,6 +509,7 @@ class DefaultExtension extends MProvider {
         this._rememberDomain(base, original.origin);
         return { value, url: target };
       } catch (error) {
+        recordDomain(base, error);
         if (error?.redirectBase) return await this._followDomainRedirect(error, target, currentReferer, operation, deadline);
         const authentication = this._authenticationRequired(error, target);
         if (authentication) throw authentication;
@@ -515,7 +524,7 @@ class DefaultExtension extends MProvider {
     this._checkListBudget();
     timeout = Math.min(timeout || 30, this._listContext ? Math.floor((this._listContext.deadline - Date.now()) / 1000) : Infinity);
     const result = await this._withDomainFallback(url, referer, async (target, currentReferer, context) => {
-      const seconds = Math.min(timeout || 30, this._numberedTokiOrigin(target) ? (context.candidate ? 20 : 35) : (timeout || 30), context.remainingSeconds);
+      const seconds = Math.min(timeout || 30, this._listContext && this._numberedTokiOrigin(target) ? 6 : Infinity, this._numberedTokiOrigin(target) ? (context.candidate ? 20 : 35) : (timeout || 30), context.remainingSeconds);
       if (seconds < 1) throw new Error("DOMAIN_SCAN_BUDGET_EXCEEDED");
       const body = await this._rawText(target, currentReferer, seconds);
       if (this._numberedTokiOrigin(target)) this._validateNovelResponse(target, body);
@@ -532,27 +541,28 @@ class DefaultExtension extends MProvider {
   async _resolveBaseUrl() {
     const manual = this._trimSlash(this._migratedPreferenceString(this.domainPreference, "toki_novel_domain_url"));
     const recovered = this.autoDomainBase || this._preferenceString("toki_novel_auto_domain_base", "");
-    const recoveredToki = this._numberedTokiOrigin(recovered);
-    const manualToki = this._numberedTokiOrigin(manual);
-    if (this._isHttpsOrigin(manual)) {
-      if (manualToki && recoveredToki && recoveredToki.number > manualToki.number) return recovered;
-      return manual;
-    }
-    if (recoveredToki && this._isHttpsOrigin(recovered)) return recovered;
     const cached = this._trimSlash(this._preferenceString("toki_novel_resolved_base", ""));
     const cachedAt = Number(this._preferenceString("toki_novel_resolved_base_time", "0"));
-    if (this._isHttpsOrigin(cached) && cachedAt > 0 && Date.now() - cachedAt < this.domainCacheMs) return cached;
+    // Shipped address updates must supersede retired numbered addresses, including
+    // legacy manual settings and stale central signals. Custom origins stay manual.
+    if (this._isHttpsOrigin(manual) && !this._numberedTokiOrigin(manual)) return manual;
+    const newest = values => values.filter(value => this._isHttpsOrigin(value) && this._numberedTokiOrigin(value))
+      .sort((a, b) => this._numberedTokiOrigin(b).number - this._numberedTokiOrigin(a).number)[0] || this.fallbackBaseUrl;
+    const known = newest([this.fallbackBaseUrl, manual, recovered, cached]);
+    if (this._numberedTokiOrigin(manual)) return known;
+    if (cachedAt > 0 && Date.now() - cachedAt < this.domainCacheMs) return known;
     try {
       const join = this.signalUrl.includes("?") ? "&" : "?";
-      const data = JSON.parse(await this._requestText(this.signalUrl + join + "toki=" + Date.now(), this.signalUrl, 8));
+      const data = JSON.parse(await this._requestText(this.signalUrl + join + "toki=" + Date.now(), this.signalUrl, this._listContext ? 2 : 4));
       const candidate = this._trimSlash(data?.domains?.toki?.baseUrl);
-      if (this._isHttpsOrigin(candidate)) {
-        this._setPreferenceString("toki_novel_resolved_base", candidate);
+      if (this._isHttpsOrigin(candidate) && this._numberedTokiOrigin(candidate)) {
+        const resolved = newest([known, candidate]);
+        this._setPreferenceString("toki_novel_resolved_base", resolved);
         this._setPreferenceString("toki_novel_resolved_base_time", String(Date.now()));
-        return candidate;
+        return resolved;
       }
     } catch (_) {}
-    return this._isHttpsOrigin(cached) ? cached : this.fallbackBaseUrl;
+    return known;
   }
 
   absoluteUrl(base, url) {
@@ -1384,7 +1394,7 @@ class DefaultExtension extends MProvider {
       let detail = this._text(error && (error.message || error)).slice(0, 500);
       const key = this._text(this._preference("toki_novel_external_auth_access_key", "")).trim();
       if (key) detail = detail.split(key).join("[접속 키 숨김]");
-      const diagnostic = new Error("외부인증 진단 v0.2.18 | 경로=" + target + " | stage=" + stage
+      const diagnostic = new Error("외부인증 진단 v0.2.19 | 경로=" + target + " | stage=" + stage
         + " | state=" + (lastState || "unknown") + " | job=" + (jobId || "not_created")
         + " | attempt=" + attempt + "/3 | elapsedMs=" + (Date.now() - started)
         + " | " + detail + "\n진행 기록:\n" + history.join("\n")
